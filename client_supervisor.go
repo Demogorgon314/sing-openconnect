@@ -364,6 +364,9 @@ func (c *Client) handleRetryableAuthenticationError(err error) bool {
 	authenticationError, loaded := E.Cast[*retryableAuthenticationError](err)
 	if loaded {
 		c.clearStableCredentials(authenticationError.cacheKeys...)
+		if callback := c.options.OnAuthenticationRejected; callback != nil {
+			callback(c.options.Context)
+		}
 	}
 	return loaded
 }

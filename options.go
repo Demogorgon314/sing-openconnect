@@ -122,5 +122,7 @@ type ClientOptions struct {
 	FormEntries                    []FormEntry
 	Dialer                         N.Dialer
 	Logger                         logger.ContextLogger
+	OnAuthenticationRejected       func(ctx context.Context)
+	OnHostScanRequested            func(ctx context.Context) error
 	OnTunnelConfiguration          func(event TunnelConfigurationEvent) error
 }

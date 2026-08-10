@@ -449,6 +449,11 @@ func (a *anyConnectAuthentication) processAuthenticationForm(
 		return nil, nil, err
 	}
 	if !a.hostScanCompleted && anyConnectHostScanRequested(a.hostScan) {
+		if callback := a.frontend.client.options.OnHostScanRequested; callback != nil {
+			if err = callback(ctx); err != nil {
+				return nil, nil, markTerminal(E.Cause(err, "AnyConnect host scan rejected by client policy"))
+			}
+		}
 		err = a.runHostScan(ctx)
 		if err != nil {
 			return nil, nil, err
