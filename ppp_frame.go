@@ -3,6 +3,7 @@ package openconnect
 import (
 	"bytes"
 	"encoding/binary"
+	"encoding/hex"
 
 	"github.com/sagernet/sing/common/buf"
 	E "github.com/sagernet/sing/common/exceptions"
@@ -67,18 +68,16 @@ func (d *pppFrameDecoder) decodeF5() ([]*buf.Buffer, error) {
 	for len(d.pending) >= 4 {
 		if binary.BigEndian.Uint16(d.pending[:2]) != pppF5Magic {
 			buf.ReleaseMulti(frames)
-			return nil, E.New("invalid F5 PPP frame magic")
+			return nil, E.New("invalid F5 PPP frame magic: ", framePreview(d.pending))
 		}
 		payloadLength := int(binary.BigEndian.Uint16(d.pending[2:4]))
-		if payloadLength == 0 {
-			buf.ReleaseMulti(frames)
-			return nil, E.New("empty F5 PPP frame")
-		}
 		frameLength := 4 + payloadLength
 		if len(d.pending) < frameLength {
 			break
 		}
-		frames = append(frames, newPacketBufferFrom(d.pending[4:frameLength]))
+		if payloadLength > 0 {
+			frames = append(frames, newPacketBufferFrom(d.pending[4:frameLength]))
+		}
 		d.pending = d.pending[frameLength:]
 	}
 	d.compact()
@@ -91,17 +90,19 @@ func (d *pppFrameDecoder) decodeFortinet() ([]*buf.Buffer, error) {
 		totalLength := int(binary.BigEndian.Uint16(d.pending[:2]))
 		if binary.BigEndian.Uint16(d.pending[2:4]) != pppFortinetMagic {
 			buf.ReleaseMulti(frames)
-			return nil, E.New("invalid Fortinet PPP frame magic")
+			return nil, E.New("invalid Fortinet PPP frame magic: ", framePreview(d.pending))
 		}
 		payloadLength := int(binary.BigEndian.Uint16(d.pending[4:6]))
-		if payloadLength == 0 || totalLength != payloadLength+6 {
+		if totalLength != payloadLength+6 {
 			buf.ReleaseMulti(frames)
-			return nil, E.New("invalid Fortinet PPP frame length")
+			return nil, E.New("invalid Fortinet PPP frame length: ", framePreview(d.pending))
 		}
 		if len(d.pending) < totalLength {
 			break
 		}
-		frames = append(frames, newPacketBufferFrom(d.pending[6:totalLength]))
+		if payloadLength > 0 {
+			frames = append(frames, newPacketBufferFrom(d.pending[6:totalLength]))
+		}
 		d.pending = d.pending[totalLength:]
 	}
 	d.compact()
@@ -140,6 +141,20 @@ func (d *pppFrameDecoder) compact() {
 	if len(d.pending) == 0 {
 		d.pending = nil
 	}
+}
+
+func (d *pppFrameDecoder) Discard() int {
+	dropped := len(d.pending)
+	d.pending = nil
+	return dropped
+}
+
+func framePreview(content []byte) string {
+	const previewLength = 64
+	if len(content) > previewLength {
+		return hex.EncodeToString(content[:previewLength]) + "..."
+	}
+	return hex.EncodeToString(content)
 }
 
 func encodePPPFrame(encapsulation pppEncapsulation, payload []byte, asyncMap uint32) ([]byte, error) {

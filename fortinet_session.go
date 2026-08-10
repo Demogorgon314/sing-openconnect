@@ -317,7 +317,7 @@ func probeFortinetDTLS(
 			if clearDeadlineErr != nil {
 				return nil, E.Cause(clearDeadlineErr, "clear Fortinet DTLS probe deadline")
 			}
-			return connection, nil
+			return &fortinetBufferedDatagramConn{Conn: connection}, nil
 		}
 		if validFortinetPPPDatagram(response) {
 			clearDeadlineErr := connection.SetDeadline(time.Time{})
@@ -548,7 +548,13 @@ func (c *fortinetBufferedDatagramConn) Read(content []byte) (int, error) {
 		return n, nil
 	}
 	c.access.Unlock()
-	return c.Conn.Read(content)
+	for {
+		n, readErr := c.Conn.Read(content)
+		if readErr == nil && validFortinetDTLSServerHello(content[:n]) {
+			continue
+		}
+		return n, readErr
+	}
 }
 
 func (s *fortinetSession) setSkipInitialDTLS(skip bool) {

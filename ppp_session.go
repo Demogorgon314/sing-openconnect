@@ -123,6 +123,7 @@ func (s *pppSession) Start() error {
 		s.terminate(setupErr)
 		return setupErr
 	}
+	setup.linkConfiguration.Logger = s.client.options.Logger
 	link, linkErr := newPPPLink(context.WithoutCancel(s.ctx), setup.linkConfiguration)
 	if linkErr != nil {
 		_ = setup.linkConfiguration.Carrier.Connection.Close()

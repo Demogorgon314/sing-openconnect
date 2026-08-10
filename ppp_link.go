@@ -13,6 +13,7 @@ import (
 
 	"github.com/sagernet/sing/common/buf"
 	E "github.com/sagernet/sing/common/exceptions"
+	"github.com/sagernet/sing/common/logger"
 )
 
 const (
@@ -67,6 +68,7 @@ type pppCarrierConfig struct {
 }
 
 type pppLinkConfig struct {
+	Logger                 logger.ContextLogger
 	Carrier                pppCarrierConfig
 	Encapsulation          pppEncapsulation
 	WantIPv4               bool
@@ -643,7 +645,16 @@ func (l *pppLink) readLoop(carrier *pppCarrier) {
 		n, err := carrier.connection.Read(buffer)
 		if n > 0 {
 			frames, decodeErr := carrier.decoder.Push(buffer[:n])
-			if decodeErr != nil {
+			if carrier.datagram {
+				dropped := carrier.decoder.Discard()
+				if l.config.Logger != nil {
+					if decodeErr != nil {
+						l.config.Logger.WarnContext(l.ctx, "dropped invalid PPP datagram: ", decodeErr)
+					} else if dropped > 0 {
+						l.config.Logger.DebugContext(l.ctx, "dropped truncated PPP frame remainder: ", dropped, " bytes")
+					}
+				}
+			} else if decodeErr != nil {
 				l.terminateCarrier(carrier.generation, markTerminal(E.Cause(decodeErr, "decode PPP carrier frame")),
 					pppLinkPhaseEstablishing, pppLinkPhaseNetwork)
 				return
