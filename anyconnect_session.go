@@ -200,6 +200,9 @@ func (s *anyConnectCSTPSession) WriteDataPacketBuffers(packetBuffers []*buf.Buff
 				continue
 			}
 		}
+		if s.client.options.DTLSRequired {
+			return ErrDataChannelNotReady
+		}
 		return s.writeDataPacketBuffers(packetBuffers[index:])
 	}
 	return nil
@@ -337,7 +340,11 @@ func (s *anyConnectCSTPSession) readLoop() {
 		case cstpPacketDPDResponse, cstpPacketKeepalive:
 			packetBuffer.Release()
 		case cstpPacketData:
-			s.client.pushIncomingDataPacketContext(s.ctx, packetBuffer)
+			if s.client.options.DTLSRequired {
+				packetBuffer.Release()
+			} else {
+				s.client.pushIncomingDataPacketContext(s.ctx, packetBuffer)
+			}
 		case cstpPacketDisconnect, cstpPacketTerminate:
 			reason := renderCSTPDisconnectReason(packetBuffer.Bytes())
 			packetBuffer.Release()

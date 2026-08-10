@@ -100,6 +100,7 @@ type ClientOptions struct {
 	TNCC                           *TNCCOptions
 	FortinetHostCheck              *FortinetHostCheckOptions
 	NoUDP                          bool
+	DTLSRequired                   bool
 	DTLSLocalPort                  uint16
 	DTLSCipherSuites               string
 	DTLS12CipherSuites             string
