@@ -585,6 +585,7 @@ func parseCSTPDTLSNegotiation(
 		Dialer:              client.options.Dialer,
 		MTU:                 mtu,
 		AllowInsecureCrypto: client.options.AllowInsecureCrypto,
+		LegacyDTLSDisabled:  client.options.LegacyDTLSDisabled,
 		Logger:              client.options.Logger,
 	}
 	for _, option := range dtlsOptions {

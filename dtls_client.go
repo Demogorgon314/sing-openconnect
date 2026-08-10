@@ -38,6 +38,7 @@ type cstpDTLSNegotiation struct {
 	MTU                 int
 	MinimumMTU          int
 	AllowInsecureCrypto bool
+	LegacyDTLSDisabled  bool
 	Compression         anyConnectCompression
 	Logger              logger.ContextLogger
 	RequestRekey        func(method string) error
@@ -80,6 +81,9 @@ func (c *anyConnectDTLSChannel) connect() (net.Conn, error) {
 	}
 
 	if isAnyConnectLegacyDTLS(c.negotiation.CipherSuite, c.negotiation.DTLS12) {
+		if c.negotiation.LegacyDTLSDisabled {
+			return nil, E.Extend(ErrDeprecatedCryptoDisabled, "Cisco DTLS 0.9 is disabled by client policy")
+		}
 		legacyConn, legacyErr := c.connectLegacy(udpConn)
 		if legacyErr != nil {
 			closeErr := udpConn.Close()
