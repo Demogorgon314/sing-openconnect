@@ -461,6 +461,36 @@ func (c *Client) Ready() bool {
 	return c.readySession() != nil
 }
 
+// WaitReady waits until a tunnel session is ready, the client fails, or ctx is canceled.
+func (c *Client) WaitReady(ctx context.Context) (TunnelConfiguration, error) {
+	if ctx == nil {
+		return TunnelConfiguration{}, E.New("wait ready context is required")
+	}
+	for {
+		c.lifecycleAccess.Lock()
+		stateChanged := c.stateChanged
+		terminalError := c.terminalError
+		closed := c.closed
+		session := c.currentSession
+		ready := !closed && terminalError == nil && session != nil && c.publishedSession == session && session.Ready()
+		c.lifecycleAccess.Unlock()
+		if ready {
+			return c.TunnelConfiguration(), nil
+		}
+		if terminalError != nil {
+			return TunnelConfiguration{}, terminalError
+		}
+		if closed {
+			return TunnelConfiguration{}, ErrClientClosed
+		}
+		select {
+		case <-ctx.Done():
+			return TunnelConfiguration{}, ctx.Err()
+		case <-stateChanged:
+		}
+	}
+}
+
 func (c *Client) TunnelConfiguration() TunnelConfiguration {
 	c.configurationAccess.RLock()
 	defer c.configurationAccess.RUnlock()
