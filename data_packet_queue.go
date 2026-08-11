@@ -83,6 +83,7 @@ func (q *dataPacketQueue[T]) Pop(maximumItems int) []T {
 		q.access.Unlock()
 		return nil
 	}
+	wasFull := q.length == len(q.items)
 	items := make([]T, count)
 	for index := range count {
 		itemIndex := (q.head + index) % len(q.items)
@@ -92,7 +93,9 @@ func (q *dataPacketQueue[T]) Pop(maximumItems int) []T {
 	}
 	q.head = (q.head + count) % len(q.items)
 	q.length -= count
-	q.signalNotFullLocked()
+	if wasFull {
+		q.signalNotFullLocked()
+	}
 	q.access.Unlock()
 	return items
 }
