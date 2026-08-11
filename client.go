@@ -714,7 +714,10 @@ func (c *Client) pushIncomingDataPacketsContext(ctx context.Context, session cli
 	for index, packetBuffer := range validBuffers {
 		packets[index] = incomingDataPacket{generation: generation, revision: revision, packetBuffer: packetBuffer}
 	}
-	pushed := c.incomingDataPackets.PushBatch(ctx, packets)
+	// Transport control packets share the DTLS/CSTP readers with data packets.
+	// Never block those readers behind a full data queue: openconnect's main
+	// loop likewise keeps DPD/rekey processing independent from TUN backpressure.
+	pushed := c.incomingDataPackets.TryPushBatch(ctx, packets)
 	if pushed < len(packets) {
 		c.droppedIncomingDataPackets.Add(uint64(len(packets) - pushed))
 		for _, packet := range packets[pushed:] {

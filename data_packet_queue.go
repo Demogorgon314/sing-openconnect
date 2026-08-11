@@ -54,6 +54,25 @@ func (q *dataPacketQueue[T]) PushBatch(ctx context.Context, items []T) int {
 	return pushed
 }
 
+func (q *dataPacketQueue[T]) TryPushBatch(ctx context.Context, items []T) int {
+	q.access.Lock()
+	defer q.access.Unlock()
+	if q.closed || ctx.Err() != nil || len(items) == 0 {
+		return 0
+	}
+	count := min(len(items), len(q.items)-q.length)
+	wasEmpty := q.length == 0
+	for index := range count {
+		tail := (q.head + q.length) % len(q.items)
+		q.items[tail] = items[index]
+		q.length++
+	}
+	if wasEmpty && count > 0 {
+		q.signalNotEmptyLocked()
+	}
+	return count
+}
+
 func (q *dataPacketQueue[T]) Pop(maximumItems int) []T {
 	q.access.Lock()
 	count := q.length

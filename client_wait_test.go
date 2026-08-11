@@ -176,6 +176,47 @@ func TestClientIncomingDataPacketCarriesConfigurationRevision(t *testing.T) {
 	}
 }
 
+func TestClientIncomingDataQueueDropsInsteadOfBlocking(t *testing.T) {
+	client, err := NewClient(ClientOptions{
+		Server:      "https://localhost",
+		Cookie:      "test-cookie",
+		QueueLength: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = client.Close() })
+	configuration := TunnelConfiguration{MTU: 1400}
+	session := &waitReadyTestSession{configuration: configuration, ready: true}
+	installWaitReadyTestSession(t, client, session, configuration)
+
+	packetBuffers := make([]*buf.Buffer, 2)
+	for index := range packetBuffers {
+		packetBuffers[index] = buf.NewSize(1)
+		_, _ = packetBuffers[index].Write([]byte{byte(index + 1)})
+	}
+	done := make(chan struct{})
+	go func() {
+		client.pushIncomingDataPacketsContext(context.Background(), session, packetBuffers)
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("full incoming data queue blocked the protocol reader")
+	}
+	if dropped := client.DroppedIncomingDataPackets(); dropped != 1 {
+		t.Fatalf("unexpected dropped incoming packet count: got %d, want 1", dropped)
+	}
+	packet, _, err := client.ReadDataPacketWithRevision(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(packet) != 1 || packet[0] != 1 {
+		t.Fatalf("unexpected queued packet: %v", packet)
+	}
+}
+
 func installWaitReadyTestSession(t *testing.T, client *Client, session clientSession, configuration TunnelConfiguration) uint64 {
 	t.Helper()
 	if !client.setCurrentSession(context.Background(), session) {
