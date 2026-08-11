@@ -476,10 +476,10 @@ func (s *ncSession) deliverTLSData(packetBuffer *buf.Buffer) error {
 			return markTerminal(E.New("oNCP KMP 300 contains a truncated IPv4 packet"))
 		}
 		if packetLength == packetBuffer.Len() {
-			s.client.pushIncomingDataPacketContext(s.ctx, packetBuffer)
+			s.client.pushIncomingDataPacketContext(s.ctx, s, packetBuffer)
 			return nil
 		}
-		s.client.pushIncomingDataPacketContext(s.ctx, newPacketBufferFrom(payload[:packetLength]))
+		s.client.pushIncomingDataPacketContext(s.ctx, s, newPacketBufferFrom(payload[:packetLength]))
 		payload = payload[packetLength:]
 	}
 	packetBuffer.Release()
@@ -499,7 +499,7 @@ func (s *ncSession) deliverESPData(packetBuffer *buf.Buffer) {
 		}
 		return
 	}
-	s.client.pushIncomingDataPacketContext(s.ctx, packetBuffer)
+	s.client.pushIncomingDataPacketContext(s.ctx, s, packetBuffer)
 }
 
 func validateNCONCPIPv4Packet(payload []byte, exact bool) (int, error) {

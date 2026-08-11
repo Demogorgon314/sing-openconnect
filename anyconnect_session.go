@@ -343,7 +343,7 @@ func (s *anyConnectCSTPSession) readLoop() {
 			if s.client.options.DTLSRequired {
 				packetBuffer.Release()
 			} else {
-				s.client.pushIncomingDataPacketContext(s.ctx, packetBuffer)
+				s.client.pushIncomingDataPacketContext(s.ctx, s, packetBuffer)
 			}
 		case cstpPacketDisconnect, cstpPacketTerminate:
 			reason := renderCSTPDisconnectReason(packetBuffer.Bytes())
@@ -374,7 +374,7 @@ func (s *anyConnectCSTPSession) readLoop() {
 					continue
 				}
 			}
-			s.client.pushIncomingDataPacketContext(s.ctx, decompressedPacket)
+			s.client.pushIncomingDataPacketContext(s.ctx, s, decompressedPacket)
 		default:
 			packetBuffer.Release()
 			s.terminate(E.Extend(ErrProtocolNotSupported, "received unknown CSTP packet type: ", packetType))
@@ -425,7 +425,7 @@ func (s *anyConnectCSTPSession) dtlsLoop(initialResult chan<- error) {
 		negotiation := *s.dtlsNegotiation
 		negotiation.MTU = s.currentMTU()
 		channel := newAnyConnectDTLS(s.ctx, negotiation, func(packetBuffer *buf.Buffer) {
-			s.client.pushIncomingDataPacketContext(s.ctx, packetBuffer)
+			s.client.pushIncomingDataPacketContext(s.ctx, s, packetBuffer)
 		})
 		s.dtlsAccess.Lock()
 		if !s.active.Load() {
@@ -539,8 +539,8 @@ func (s *anyConnectCSTPSession) applyDTLSMTU(mtu int) {
 	configuration := cloneTunnelConfiguration(s.configuration)
 	s.configurationAccess.Unlock()
 	if s.ready.Load() {
-		configuration = s.client.setTunnelConfiguration(configuration)
-		s.client.publishTunnelConfigurationEvent(TunnelConfigurationEventPathMTU, configuration)
+		configuration, revision := s.client.setTunnelConfiguration(configuration)
+		s.client.publishTunnelConfigurationEvent(TunnelConfigurationEventPathMTU, revision, configuration)
 	}
 }
 

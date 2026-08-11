@@ -121,7 +121,7 @@ func (s *f5Session) preparePPP() (pppSessionSetup, error) {
 			RequestIPv4NameServers: requestNameServers,
 			EchoInterval:           echoInterval,
 			Deliver: func(packetBuffer *buf.Buffer) {
-				s.client.pushIncomingDataPacketContext(s.ctx, packetBuffer)
+				s.client.pushIncomingDataPacketContext(s.ctx, s, packetBuffer)
 			},
 		},
 		configuration: configuration.configuration,

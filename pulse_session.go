@@ -177,7 +177,7 @@ func (s *pulseSession) readLoop(connection *pulseIFTConnection) {
 				}
 				continue
 			}
-			s.client.pushIncomingDataPacketContext(s.ctx, frame.packetBuffer)
+			s.client.pushIncomingDataPacketContext(s.ctx, s, frame.packetBuffer)
 		case 1:
 			if !pulseESPConfigurationFrameValid(frame.packetBuffer.Bytes()) {
 				frame.packetBuffer.Release()
@@ -760,7 +760,7 @@ func (s *pulseSession) deliverESP(generation uint64, packetBuffer *buf.Buffer) {
 		}
 		return
 	}
-	s.client.pushIncomingDataPacketContext(s.ctx, packetBuffer)
+	s.client.pushIncomingDataPacketContext(s.ctx, s, packetBuffer)
 }
 
 func pulseESPAllowsIPVersion(configuration *pulseESPConfiguration, version byte) bool {

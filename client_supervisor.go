@@ -231,14 +231,14 @@ func (c *Client) runSupervisor(ctx context.Context) {
 		established = true
 		reconnecting = false
 		reconnectTimeoutRemaining = 0
-		configuration := c.setTunnelConfiguration(session.TunnelConfiguration())
-		if !c.publishCurrentSession(ctx, session) {
+		configuration, revision := c.setTunnelConfiguration(session.TunnelConfiguration())
+		if !c.publishCurrentSession(ctx, session, revision) {
 			_ = session.Close()
 			c.clearCurrentSession(session)
 			_ = closeObtainedSession(sessionState)
 			return
 		}
-		c.publishTunnelConfigurationEvent(reason, configuration)
+		c.publishTunnelConfigurationEvent(reason, revision, configuration)
 		if c.options.Logger != nil {
 			if reason == TunnelConfigurationEventInitial {
 				c.options.Logger.InfoContext(ctx, c.options.Flavor, " tunnel established using ", c.ActiveTransport())
@@ -409,40 +409,57 @@ func nextClientReconnectBackoff(backoff time.Duration) time.Duration {
 }
 
 func (c *Client) setCurrentSession(ctx context.Context, session clientSession) bool {
+	c.dataPlaneAccess.Lock()
+	defer c.dataPlaneAccess.Unlock()
 	c.lifecycleAccess.Lock()
 	defer c.lifecycleAccess.Unlock()
 	if c.closed || ctx.Err() != nil {
 		return false
 	}
+	c.sessionGeneration++
+	c.currentSessionGeneration = c.sessionGeneration
 	c.currentSession = session
 	c.publishedSession = nil
+	c.publishedSessionGeneration = 0
+	c.publishedSessionInitialRevision = 0
+	c.publishedSessionRevision = 0
 	c.activeTransportSession = session
 	c.setActiveTransportWithLifecycleLocked("")
 	c.signalStateChangedLocked()
 	return true
 }
 
-func (c *Client) publishCurrentSession(ctx context.Context, session clientSession) bool {
+func (c *Client) publishCurrentSession(ctx context.Context, session clientSession, revision uint64) bool {
+	c.dataPlaneAccess.Lock()
+	defer c.dataPlaneAccess.Unlock()
 	c.lifecycleAccess.Lock()
 	defer c.lifecycleAccess.Unlock()
 	if c.closed || c.terminalError != nil || ctx.Err() != nil || c.currentSession != session || !session.Ready() {
 		return false
 	}
 	c.publishedSession = session
+	c.publishedSessionGeneration = c.currentSessionGeneration
+	c.publishedSessionInitialRevision = revision
+	c.publishedSessionRevision = revision
 	c.signalStateChangedLocked()
 	return true
 }
 
 func (c *Client) clearCurrentSession(session clientSession) {
+	c.dataPlaneAccess.Lock()
 	c.lifecycleAccess.Lock()
 	if c.currentSession == session {
 		c.currentSession = nil
 		c.publishedSession = nil
+		c.publishedSessionGeneration = 0
+		c.publishedSessionInitialRevision = 0
+		c.publishedSessionRevision = 0
 		c.activeTransportSession = nil
 		c.setActiveTransportWithLifecycleLocked("")
 	}
 	c.signalStateChangedLocked()
 	c.lifecycleAccess.Unlock()
+	c.dataPlaneAccess.Unlock()
 }
 
 func (c *Client) readySession() clientSession {
@@ -452,6 +469,25 @@ func (c *Client) readySession() clientSession {
 		return nil
 	}
 	return c.currentSession
+}
+
+func (c *Client) readySessionSnapshot() (clientSession, uint64, uint64) {
+	c.lifecycleAccess.Lock()
+	defer c.lifecycleAccess.Unlock()
+	if c.closed || c.terminalError != nil || c.currentSession == nil || c.publishedSession != c.currentSession || !c.currentSession.Ready() {
+		return nil, 0, 0
+	}
+	return c.currentSession, c.currentSessionGeneration, c.publishedSessionRevision
+}
+
+func (c *Client) readySessionAtRevision(revision uint64) (clientSession, uint64) {
+	c.lifecycleAccess.Lock()
+	defer c.lifecycleAccess.Unlock()
+	if c.closed || c.terminalError != nil || c.currentSession == nil || c.publishedSession != c.currentSession ||
+		!c.currentSession.Ready() || c.publishedSessionRevision != revision {
+		return nil, 0
+	}
+	return c.currentSession, c.currentSessionGeneration
 }
 
 func (c *Client) setTerminalError(err error) {
@@ -488,14 +524,19 @@ func (c *Client) signalStateChangedLocked() {
 }
 
 func (c *Client) closeSupervisorState() {
+	c.dataPlaneAccess.Lock()
 	c.lifecycleAccess.Lock()
 	if !c.closed && c.terminalError == nil {
 		c.closed = true
 	}
 	c.currentSession = nil
 	c.publishedSession = nil
+	c.publishedSessionGeneration = 0
+	c.publishedSessionInitialRevision = 0
+	c.publishedSessionRevision = 0
 	c.activeTransportSession = nil
 	c.setActiveTransportWithLifecycleLocked("")
 	c.signalStateChangedLocked()
 	c.lifecycleAccess.Unlock()
+	c.dataPlaneAccess.Unlock()
 }

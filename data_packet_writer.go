@@ -9,6 +9,8 @@ import (
 
 type outboundDataPacket struct {
 	session      clientSession
+	generation   uint64
+	revision     uint64
 	packetBuffer *buf.Buffer
 	completion   *outboundDataPacketCompletion
 }
@@ -45,7 +47,12 @@ func (c *outboundDataPacketCompletion) wait() error {
 	return c.err
 }
 
-func (c *Client) enqueueOutboundDataPacketBuffers(session clientSession, packetBuffers []*buf.Buffer) error {
+func (c *Client) enqueueOutboundDataPacketBuffers(
+	session clientSession,
+	generation uint64,
+	revision uint64,
+	packetBuffers []*buf.Buffer,
+) error {
 	completion := &outboundDataPacketCompletion{
 		remaining: len(packetBuffers),
 		done:      make(chan struct{}),
@@ -54,6 +61,8 @@ func (c *Client) enqueueOutboundDataPacketBuffers(session clientSession, packetB
 	for index, packetBuffer := range packetBuffers {
 		packets[index] = outboundDataPacket{
 			session:      session,
+			generation:   generation,
+			revision:     revision,
 			packetBuffer: packetBuffer,
 			completion:   completion,
 		}
@@ -114,15 +123,32 @@ func (c *Client) writeQueuedOutboundDataPackets(packets []outboundDataPacket) {
 		}
 		return
 	}
+	// Keep revision/session transitions behind this packet's protocol write.
+	c.dataPlaneAccess.RLock()
+	if !c.outboundDataPacketCurrent(packets[0]) {
+		c.dataPlaneAccess.RUnlock()
+		c.failQueuedOutboundDataPackets(packets, ErrDataChannelNotReady)
+		return
+	}
 	packetBuffers := make([]*buf.Buffer, len(packets))
 	for index, packet := range packets {
 		packetBuffers[index] = packet.packetBuffer
 	}
 	err := packets[0].session.WriteDataPacketBuffers(packetBuffers)
+	c.dataPlaneAccess.RUnlock()
 	for range packets {
 		completion.complete(err)
 		<-c.outgoingDataPacketSlots
 	}
+}
+
+func (c *Client) outboundDataPacketCurrent(packet outboundDataPacket) bool {
+	c.lifecycleAccess.Lock()
+	defer c.lifecycleAccess.Unlock()
+	return !c.closed && c.terminalError == nil && c.currentSession == packet.session &&
+		c.currentSessionGeneration == packet.generation && c.publishedSession == packet.session &&
+		c.publishedSessionGeneration == packet.generation && c.publishedSessionRevision == packet.revision &&
+		packet.session.Ready()
 }
 
 func (c *Client) failQueuedOutboundDataPackets(packets []outboundDataPacket, err error) {

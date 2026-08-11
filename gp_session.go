@@ -184,7 +184,7 @@ func (s *gpSession) startInitialESP(configuration *gpTunnelConfiguration) error 
 		BuildProbe:      probe.build,
 		IsProbeResponse: probe.matches,
 		Deliver: func(packetBuffer *buf.Buffer) {
-			s.client.pushIncomingDataPacketContext(s.ctx, packetBuffer)
+			s.client.pushIncomingDataPacketContext(s.ctx, s, packetBuffer)
 		},
 		PreserveKeysOnStartupFailure: true,
 	}
@@ -350,7 +350,7 @@ func (s *gpSession) openGPST() error {
 		DPD:        configuration.DPD,
 		Keepalive:  configuration.Keepalive,
 		Deliver: func(packetBuffer *buf.Buffer) {
-			s.client.pushIncomingDataPacketContext(s.ctx, packetBuffer)
+			s.client.pushIncomingDataPacketContext(s.ctx, s, packetBuffer)
 		},
 	})
 	if err != nil {

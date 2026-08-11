@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/sagernet/sing/common/buf"
@@ -26,46 +27,54 @@ const (
 )
 
 type Client struct {
-	options                      ClientOptions
-	serverURL                    *url.URL
-	tlsConfig                    *tls.Config
-	mcaIdentity                  *mcaIdentity
-	clientCertificateAccess      sync.RWMutex
-	clientCertificateSet         bool
-	selectedClientCertificate    []byte
-	httpClient                   *http.Client
-	httpTransport                *http.Transport
-	frontend                     flavorFrontend
-	authChallengeAccess          sync.Mutex
-	authChallengeUpdated         chan struct{}
-	pendingAuthChallenge         *pendingAuthChallengeState
-	stableCredentials            map[string]string
-	configurationAccess          sync.RWMutex
-	tunnelConfiguration          TunnelConfiguration
-	configurationEventAccess     sync.Mutex
-	configurationEvents          []TunnelConfigurationEvent
-	configurationEventWake       chan struct{}
-	configurationEventStopped    bool
-	activeTransportAccess        sync.Mutex
-	activeTransport              string
-	activeTransportUpdated       chan struct{}
-	incomingDataPackets          *dataPacketQueue[*buf.Buffer]
-	outgoingDataPackets          *dataPacketQueue[outboundDataPacket]
-	outgoingDataPacketSlots      chan struct{}
-	outgoingDataPacketClosed     chan struct{}
-	outgoingDataPacketWriterDone chan struct{}
-	lifecycleAccess              sync.Mutex
-	started                      bool
-	closed                       bool
-	terminalError                error
-	currentSession               clientSession
-	publishedSession             clientSession
-	activeTransportSession       clientSession
-	stateChanged                 chan struct{}
-	supervisorCancel             context.CancelFunc
-	supervisorDone               chan struct{}
-	closeOnce                    sync.Once
-	closeErr                     error
+	options                         ClientOptions
+	serverURL                       *url.URL
+	tlsConfig                       *tls.Config
+	mcaIdentity                     *mcaIdentity
+	clientCertificateAccess         sync.RWMutex
+	clientCertificateSet            bool
+	selectedClientCertificate       []byte
+	httpClient                      *http.Client
+	httpTransport                   *http.Transport
+	frontend                        flavorFrontend
+	authChallengeAccess             sync.Mutex
+	authChallengeUpdated            chan struct{}
+	pendingAuthChallenge            *pendingAuthChallengeState
+	stableCredentials               map[string]string
+	configurationAccess             sync.RWMutex
+	tunnelConfiguration             TunnelConfiguration
+	tunnelConfigurationRevision     uint64
+	configurationEventAccess        sync.Mutex
+	configurationEvents             []TunnelConfigurationEvent
+	configurationEventWake          chan struct{}
+	configurationEventStopped       bool
+	activeTransportAccess           sync.Mutex
+	activeTransport                 string
+	activeTransportUpdated          chan struct{}
+	incomingDataPackets             *dataPacketQueue[incomingDataPacket]
+	droppedIncomingDataPackets      atomic.Uint64
+	outgoingDataPackets             *dataPacketQueue[outboundDataPacket]
+	outgoingDataPacketSlots         chan struct{}
+	outgoingDataPacketClosed        chan struct{}
+	outgoingDataPacketWriterDone    chan struct{}
+	dataPlaneAccess                 sync.RWMutex
+	lifecycleAccess                 sync.Mutex
+	started                         bool
+	closed                          bool
+	terminalError                   error
+	currentSession                  clientSession
+	sessionGeneration               uint64
+	currentSessionGeneration        uint64
+	publishedSession                clientSession
+	publishedSessionGeneration      uint64
+	publishedSessionInitialRevision uint64
+	publishedSessionRevision        uint64
+	activeTransportSession          clientSession
+	stateChanged                    chan struct{}
+	supervisorCancel                context.CancelFunc
+	supervisorDone                  chan struct{}
+	closeOnce                       sync.Once
+	closeErr                        error
 }
 
 func NewClient(options ClientOptions) (*Client, error) {
@@ -145,7 +154,7 @@ func NewClient(options ClientOptions) (*Client, error) {
 		stableCredentials:        make(map[string]string),
 		configurationEventWake:   make(chan struct{}, 1),
 		activeTransportUpdated:   make(chan struct{}),
-		incomingDataPackets:      newDataPacketQueue[*buf.Buffer](int(options.QueueLength)),
+		incomingDataPackets:      newDataPacketQueue[incomingDataPacket](int(options.QueueLength)),
 		outgoingDataPackets:      newDataPacketQueue[outboundDataPacket](int(options.QueueLength)),
 		outgoingDataPacketSlots:  make(chan struct{}, int(options.QueueLength)),
 		outgoingDataPacketClosed: make(chan struct{}),
@@ -382,13 +391,19 @@ func (c *Client) RestartSession() {
 
 // ReadDataPacket returns a caller-owned copy of the next packet.
 func (c *Client) ReadDataPacket(ctx context.Context) ([]byte, error) {
-	packetBuffer, err := c.ReadDataPacketBuffer(ctx)
+	payload, _, err := c.ReadDataPacketWithRevision(ctx)
+	return payload, err
+}
+
+// ReadDataPacketWithRevision returns a caller-owned copy of the next packet and the tunnel configuration revision that received it.
+func (c *Client) ReadDataPacketWithRevision(ctx context.Context) ([]byte, uint64, error) {
+	packet, err := c.readDataPacket(ctx)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
-	payload := append([]byte(nil), packetBuffer.Bytes()...)
-	packetBuffer.Release()
-	return payload, nil
+	payload := append([]byte(nil), packet.packetBuffer.Bytes()...)
+	packet.packetBuffer.Release()
+	return payload, packet.revision, nil
 }
 
 // ReadDataPackets transfers ownership of the returned buffers to the caller, which must release each buffer.
@@ -398,14 +413,34 @@ func (c *Client) ReadDataPackets(ctx context.Context) ([]*buf.Buffer, error) {
 
 // ReadDataPacketBuffer transfers ownership of the returned buffer to the caller, which must release it.
 func (c *Client) ReadDataPacketBuffer(ctx context.Context) (*buf.Buffer, error) {
-	packetBuffers, err := c.readDataPackets(ctx, 1)
+	packet, err := c.readDataPacket(ctx)
 	if err != nil {
 		return nil, err
 	}
-	return packetBuffers[0], nil
+	return packet.packetBuffer, nil
 }
 
 func (c *Client) readDataPackets(ctx context.Context, maximumPackets int) ([]*buf.Buffer, error) {
+	packets, err := c.readIncomingDataPackets(ctx, maximumPackets)
+	if err != nil {
+		return nil, err
+	}
+	packetBuffers := make([]*buf.Buffer, len(packets))
+	for index, packet := range packets {
+		packetBuffers[index] = packet.packetBuffer
+	}
+	return packetBuffers, nil
+}
+
+func (c *Client) readDataPacket(ctx context.Context) (incomingDataPacket, error) {
+	packets, err := c.readIncomingDataPackets(ctx, 1)
+	if err != nil {
+		return incomingDataPacket{}, err
+	}
+	return packets[0], nil
+}
+
+func (c *Client) readIncomingDataPackets(ctx context.Context, maximumPackets int) ([]incomingDataPacket, error) {
 	for {
 		c.lifecycleAccess.Lock()
 		stateChanged := c.stateChanged
@@ -418,9 +453,31 @@ func (c *Client) readDataPackets(ctx context.Context, maximumPackets int) ([]*bu
 		if closed {
 			return nil, ErrClientClosed
 		}
-		packetBuffers := c.incomingDataPackets.Pop(maximumPackets)
-		if len(packetBuffers) > 0 {
-			return packetBuffers, nil
+		packets := c.incomingDataPackets.Pop(maximumPackets)
+		if len(packets) > 0 {
+			currentPackets := packets[:0]
+			for index, packet := range packets {
+				resolvedPacket, current, err := c.resolveIncomingDataPacket(ctx, packet)
+				if err != nil {
+					for _, currentPacket := range currentPackets {
+						currentPacket.packetBuffer.Release()
+					}
+					for _, pendingPacket := range packets[index:] {
+						pendingPacket.packetBuffer.Release()
+					}
+					return nil, err
+				}
+				if !current {
+					c.droppedIncomingDataPackets.Add(1)
+					packet.packetBuffer.Release()
+					continue
+				}
+				currentPackets = append(currentPackets, resolvedPacket)
+			}
+			if len(currentPackets) > 0 {
+				return currentPackets, nil
+			}
+			continue
 		}
 		select {
 		case <-ctx.Done():
@@ -436,6 +493,15 @@ func (c *Client) WriteDataPacket(packet []byte) error {
 	return c.WriteDataPackets([][]byte{packet})
 }
 
+// WriteDataPacketAtRevision copies and writes packet only if revision still identifies the ready tunnel configuration.
+func (c *Client) WriteDataPacketAtRevision(packet []byte, revision uint64) error {
+	session, generation := c.readySessionAtRevision(revision)
+	if session == nil {
+		return ErrDataChannelNotReady
+	}
+	return c.enqueueOutboundDataPacketBuffers(session, generation, revision, newPacketBuffersFrom([][]byte{packet}))
+}
+
 // WriteDataPackets copies every packet before returning.
 func (c *Client) WriteDataPackets(packets [][]byte) error {
 	if len(packets) == 0 {
@@ -449,12 +515,12 @@ func (c *Client) WriteDataPacketBuffers(packetBuffers []*buf.Buffer) error {
 	if len(packetBuffers) == 0 {
 		return nil
 	}
-	session := c.readySession()
+	session, generation, revision := c.readySessionSnapshot()
 	if session == nil {
 		buf.ReleaseMulti(packetBuffers)
 		return ErrDataChannelNotReady
 	}
-	return c.enqueueOutboundDataPacketBuffers(session, packetBuffers)
+	return c.enqueueOutboundDataPacketBuffers(session, generation, revision, packetBuffers)
 }
 
 func (c *Client) Ready() bool {
@@ -463,8 +529,16 @@ func (c *Client) Ready() bool {
 
 // WaitReady waits until a tunnel session is ready, the client fails, or ctx is canceled.
 func (c *Client) WaitReady(ctx context.Context) (TunnelConfiguration, error) {
+	if _, err := c.WaitReadyRevision(ctx); err != nil {
+		return TunnelConfiguration{}, err
+	}
+	return c.TunnelConfiguration(), nil
+}
+
+// WaitReadyRevision waits until a tunnel session is ready and returns its configuration revision without cloning the configuration.
+func (c *Client) WaitReadyRevision(ctx context.Context) (uint64, error) {
 	if ctx == nil {
-		return TunnelConfiguration{}, E.New("wait ready context is required")
+		return 0, E.New("wait ready context is required")
 	}
 	for {
 		c.lifecycleAccess.Lock()
@@ -473,19 +547,20 @@ func (c *Client) WaitReady(ctx context.Context) (TunnelConfiguration, error) {
 		closed := c.closed
 		session := c.currentSession
 		ready := !closed && terminalError == nil && session != nil && c.publishedSession == session && session.Ready()
+		revision := c.publishedSessionRevision
 		c.lifecycleAccess.Unlock()
 		if ready {
-			return c.TunnelConfiguration(), nil
+			return revision, nil
 		}
 		if terminalError != nil {
-			return TunnelConfiguration{}, terminalError
+			return 0, terminalError
 		}
 		if closed {
-			return TunnelConfiguration{}, ErrClientClosed
+			return 0, ErrClientClosed
 		}
 		select {
 		case <-ctx.Done():
-			return TunnelConfiguration{}, ctx.Err()
+			return 0, ctx.Err()
 		case <-stateChanged:
 		}
 	}
@@ -497,15 +572,25 @@ func (c *Client) TunnelConfiguration() TunnelConfiguration {
 	return cloneTunnelConfiguration(c.tunnelConfiguration)
 }
 
-func (c *Client) setTunnelConfiguration(configuration TunnelConfiguration) TunnelConfiguration {
+func (c *Client) setTunnelConfiguration(configuration TunnelConfiguration) (TunnelConfiguration, uint64) {
 	configuration = normalizeTunnelConfiguration(configuration, c.options.IPv6Disabled)
 	c.configurationAccess.Lock()
 	c.tunnelConfiguration = configuration
+	c.tunnelConfigurationRevision++
+	revision := c.tunnelConfigurationRevision
 	c.configurationAccess.Unlock()
-	return configuration
+	return configuration, revision
 }
 
-func (c *Client) publishTunnelConfigurationEvent(reason TunnelConfigurationEventReason, configuration TunnelConfiguration) {
+func (c *Client) publishTunnelConfigurationEvent(reason TunnelConfigurationEventReason, revision uint64, configuration TunnelConfiguration) {
+	c.dataPlaneAccess.Lock()
+	c.lifecycleAccess.Lock()
+	if c.publishedSession != nil && c.publishedSession == c.currentSession && revision > c.publishedSessionRevision {
+		c.publishedSessionRevision = revision
+		c.signalStateChangedLocked()
+	}
+	c.lifecycleAccess.Unlock()
+	c.dataPlaneAccess.Unlock()
 	if c.options.OnTunnelConfiguration == nil {
 		return
 	}
@@ -513,6 +598,7 @@ func (c *Client) publishTunnelConfigurationEvent(reason TunnelConfigurationEvent
 	if !c.configurationEventStopped {
 		c.configurationEvents = append(c.configurationEvents, TunnelConfigurationEvent{
 			Reason:        reason,
+			Revision:      revision,
 			Configuration: cloneTunnelConfiguration(configuration),
 		})
 	}
@@ -560,7 +646,13 @@ func (c *Client) runTunnelConfigurationDispatcher() {
 	}
 }
 
-func (c *Client) pushIncomingDataPacketContext(ctx context.Context, packetBuffer *buf.Buffer) {
+type incomingDataPacket struct {
+	generation   uint64
+	revision     uint64
+	packetBuffer *buf.Buffer
+}
+
+func (c *Client) pushIncomingDataPacketContext(ctx context.Context, session clientSession, packetBuffer *buf.Buffer) {
 	if packetBuffer == nil {
 		return
 	}
@@ -568,13 +660,64 @@ func (c *Client) pushIncomingDataPacketContext(ctx context.Context, packetBuffer
 		packetBuffer.Release()
 		return
 	}
-	if c.incomingDataPackets.PushBatch(ctx, []*buf.Buffer{packetBuffer}) == 0 {
+	c.lifecycleAccess.Lock()
+	allowed := !c.closed && c.terminalError == nil && c.currentSession == session
+	generation := c.currentSessionGeneration
+	revision := uint64(0)
+	if c.publishedSession == session && c.publishedSessionGeneration == generation && session.Ready() {
+		revision = c.publishedSessionRevision
+	}
+	c.lifecycleAccess.Unlock()
+	if !allowed {
+		c.droppedIncomingDataPackets.Add(1)
+		packetBuffer.Release()
+		return
+	}
+	packet := incomingDataPacket{generation: generation, revision: revision, packetBuffer: packetBuffer}
+	if c.incomingDataPackets.PushBatch(ctx, []incomingDataPacket{packet}) == 0 {
+		c.droppedIncomingDataPackets.Add(1)
 		packetBuffer.Release()
 	}
 }
 
+func (c *Client) resolveIncomingDataPacket(ctx context.Context, packet incomingDataPacket) (incomingDataPacket, bool, error) {
+	for {
+		c.lifecycleAccess.Lock()
+		stateChanged := c.stateChanged
+		terminalError := c.terminalError
+		closed := c.closed
+		if packet.generation != c.currentSessionGeneration {
+			c.lifecycleAccess.Unlock()
+			return incomingDataPacket{}, false, nil
+		}
+		ready := !closed && terminalError == nil && c.currentSession != nil && c.publishedSession == c.currentSession &&
+			c.publishedSessionGeneration == packet.generation && c.currentSession.Ready()
+		if ready {
+			publishedRevision := c.publishedSessionRevision
+			initialRevision := c.publishedSessionInitialRevision
+			c.lifecycleAccess.Unlock()
+			if packet.revision == 0 {
+				packet.revision = initialRevision
+			}
+			return packet, packet.revision == publishedRevision, nil
+		}
+		c.lifecycleAccess.Unlock()
+		if terminalError != nil {
+			return incomingDataPacket{}, false, terminalError
+		}
+		if closed {
+			return incomingDataPacket{}, false, ErrClientClosed
+		}
+		select {
+		case <-ctx.Done():
+			return incomingDataPacket{}, false, ctx.Err()
+		case <-stateChanged:
+		}
+	}
+}
+
 func (c *Client) DroppedIncomingDataPackets() uint64 {
-	return 0
+	return c.droppedIncomingDataPackets.Load()
 }
 
 func (c *Client) Close() error {
@@ -624,6 +767,10 @@ func (c *Client) Close() error {
 				})
 			}
 		}
+		// Closing the session unblocks any active protocol write. Drain the gate
+		// afterward without holding lifecycleAccess.
+		c.dataPlaneAccess.Lock()
+		c.dataPlaneAccess.Unlock()
 		if supervisorDone != nil {
 			<-supervisorDone
 		}
@@ -631,7 +778,9 @@ func (c *Client) Close() error {
 			<-outgoingDataPacketWriterDone
 		}
 		c.httpTransport.CloseIdleConnections()
-		c.incomingDataPackets.Drain((*buf.Buffer).Release)
+		c.incomingDataPackets.Drain(func(packet incomingDataPacket) {
+			packet.packetBuffer.Release()
+		})
 	})
 	return c.closeErr
 }

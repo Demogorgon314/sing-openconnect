@@ -292,8 +292,8 @@ func (s *pppSession) controlLoop(link *pppLink, usingDTLS bool) {
 			s.client.setActiveTransport(s.owner, TransportDTLS)
 			s.handler.setSkipInitialDTLS(false)
 			s.publishPPPConfiguration(link.TunnelConfiguration())
-			clientConfiguration := s.client.setTunnelConfiguration(s.TunnelConfiguration())
-			s.client.publishTunnelConfigurationEvent(TunnelConfigurationEventReestablishment, clientConfiguration)
+			clientConfiguration, revision := s.client.setTunnelConfiguration(s.TunnelConfiguration())
+			s.client.publishTunnelConfigurationEvent(TunnelConfigurationEventReestablishment, revision, clientConfiguration)
 			retryChannel = nil
 		}
 	}

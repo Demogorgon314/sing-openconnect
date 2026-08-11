@@ -133,7 +133,7 @@ func (s *fortinetSession) preparePPP() (pppSessionSetup, error) {
 			RequestIPv4NameServers: requestNameServers,
 			EchoInterval:           configuration.echoInterval,
 			Deliver: func(packetBuffer *buf.Buffer) {
-				s.client.pushIncomingDataPacketContext(s.ctx, packetBuffer)
+				s.client.pushIncomingDataPacketContext(s.ctx, s, packetBuffer)
 			},
 		},
 		configuration:   configuration.configuration,

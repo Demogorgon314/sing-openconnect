@@ -51,6 +51,7 @@ type TunnelRoute struct {
 
 type TunnelConfigurationEvent struct {
 	Reason        TunnelConfigurationEventReason
+	Revision      uint64
 	Configuration TunnelConfiguration
 }
 
