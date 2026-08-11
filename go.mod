@@ -6,8 +6,8 @@ require (
 	github.com/anchore/go-lzo v0.1.0
 	github.com/google/certificate-transparency-go v1.3.2
 	github.com/klauspost/compress v1.18.0
-	github.com/pion/dtls/v3 v3.1.5
 	github.com/pierrec/lz4/v4 v4.1.21
+	github.com/pion/dtls/v3 v3.1.5
 	github.com/sagernet/sing v0.8.12-0.20260702081104-2ded2af32d3d
 	github.com/smallstep/pkcs7 v0.1.1
 	github.com/youmark/pkcs8 v0.0.0-20240726163527-a2c0da244d78
@@ -21,4 +21,4 @@ require (
 	github.com/pion/transport/v4 v4.0.2 // indirect
 )
 
-replace github.com/pion/dtls/v3 => github.com/Demogorgon314/dtls/v3 v3.1.6-0.20260811061928-ccfbf1bfdfbf
+replace github.com/pion/dtls/v3 => github.com/Demogorgon314/dtls/v3 v3.1.6-0.20260811073136-c37d8ba58190
