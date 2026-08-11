@@ -21,4 +21,4 @@ require (
 	github.com/pion/transport/v4 v4.0.2 // indirect
 )
 
-replace github.com/pion/dtls/v3 => github.com/Demogorgon314/dtls/v3 v3.1.6-0.20260811153042-e4418dd7383a
+replace github.com/pion/dtls/v3 => github.com/Demogorgon314/dtls/v3 v3.1.6-0.20260811162613-ffa317d4c975
