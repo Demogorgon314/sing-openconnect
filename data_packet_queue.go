@@ -18,7 +18,7 @@ type dataPacketQueue[T any] struct {
 func newDataPacketQueue[T any](capacity int) *dataPacketQueue[T] {
 	return &dataPacketQueue[T]{
 		items:    make([]T, capacity),
-		notEmpty: make(chan struct{}),
+		notEmpty: make(chan struct{}, 1),
 		notFull:  make(chan struct{}),
 	}
 }
@@ -101,6 +101,14 @@ func (q *dataPacketQueue[T]) PopInto(items []T, maximumItems int) []T {
 	}
 	q.head = (q.head + count) % len(q.items)
 	q.length -= count
+	if q.length == 0 {
+		select {
+		case <-q.notEmpty:
+		default:
+		}
+	} else if !q.closed {
+		q.signalNotEmptyLocked()
+	}
 	if wasFull {
 		q.signalNotFullLocked()
 	}
@@ -111,10 +119,11 @@ func (q *dataPacketQueue[T]) PopInto(items []T, maximumItems int) []T {
 func (q *dataPacketQueue[T]) Wake() <-chan struct{} {
 	q.access.Lock()
 	defer q.access.Unlock()
-	if q.length > 0 || q.closed {
-		ready := make(chan struct{})
-		close(ready)
-		return ready
+	if q.closed {
+		return q.notEmpty
+	}
+	if q.length > 0 {
+		q.signalNotEmptyLocked()
 	}
 	return q.notEmpty
 }
@@ -129,7 +138,7 @@ func (q *dataPacketQueue[T]) Close() {
 	q.access.Lock()
 	if !q.closed {
 		q.closed = true
-		q.signalNotEmptyLocked()
+		close(q.notEmpty)
 		q.signalNotFullLocked()
 	}
 	q.access.Unlock()
@@ -144,8 +153,10 @@ func (q *dataPacketQueue[T]) Drain(release func(T)) {
 }
 
 func (q *dataPacketQueue[T]) signalNotEmptyLocked() {
-	close(q.notEmpty)
-	q.notEmpty = make(chan struct{})
+	select {
+	case q.notEmpty <- struct{}{}:
+	default:
+	}
 }
 
 func (q *dataPacketQueue[T]) signalNotFullLocked() {
