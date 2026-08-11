@@ -526,6 +526,11 @@ func (c *Client) WriteDataPacketsAtRevision(packets [][]byte, revision uint64) e
 	if session == nil {
 		return ErrDataChannelNotReady
 	}
+	if len(packets) == 1 {
+		packetBuffer := newPacketBufferFrom(packets[0])
+		packetBuffers := [1]*buf.Buffer{packetBuffer}
+		return c.enqueueOutboundDataPacketBuffers(session, generation, revision, packetBuffers[:])
+	}
 	return c.enqueueOutboundDataPacketBuffers(session, generation, revision, newPacketBuffersFrom(packets))
 }
 

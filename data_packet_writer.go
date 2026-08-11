@@ -16,10 +16,12 @@ type outboundDataPacket struct {
 }
 
 type outboundDataPacketCompletion struct {
-	access    sync.Mutex
-	remaining int
-	err       error
-	done      chan error
+	access              sync.Mutex
+	remaining           int
+	err                 error
+	done                chan error
+	singlePacket        [1]outboundDataPacket
+	singlePacketBuffers [1]*buf.Buffer
 }
 
 func (c *outboundDataPacketCompletion) complete(err error) {
@@ -55,6 +57,8 @@ func (c *Client) acquireOutboundDataPacketCompletion(remaining int) *outboundDat
 }
 
 func (c *Client) releaseOutboundDataPacketCompletion(completion *outboundDataPacketCompletion) {
+	completion.singlePacket[0] = outboundDataPacket{}
+	completion.singlePacketBuffers[0] = nil
 	c.outgoingDataPacketCompletions.Put(completion)
 }
 
@@ -66,7 +70,12 @@ func (c *Client) enqueueOutboundDataPacketBuffers(
 ) error {
 	completion := c.acquireOutboundDataPacketCompletion(len(packetBuffers))
 	defer c.releaseOutboundDataPacketCompletion(completion)
-	packets := make([]outboundDataPacket, len(packetBuffers))
+	var packets []outboundDataPacket
+	if len(packetBuffers) == 1 {
+		packets = completion.singlePacket[:]
+	} else {
+		packets = make([]outboundDataPacket, len(packetBuffers))
+	}
 	for index, packetBuffer := range packetBuffers {
 		packets[index] = outboundDataPacket{
 			session:      session,
@@ -141,11 +150,19 @@ func (c *Client) writeQueuedOutboundDataPackets(packets []outboundDataPacket) {
 		c.failQueuedOutboundDataPackets(packets, ErrDataChannelNotReady)
 		return
 	}
-	packetBuffers := make([]*buf.Buffer, len(packets))
+	var packetBuffers []*buf.Buffer
+	if len(packets) == 1 {
+		packetBuffers = completion.singlePacketBuffers[:]
+	} else {
+		packetBuffers = make([]*buf.Buffer, len(packets))
+	}
 	for index, packet := range packets {
 		packetBuffers[index] = packet.packetBuffer
 	}
 	err := packets[0].session.WriteDataPacketBuffers(packetBuffers)
+	if len(packets) == 1 {
+		completion.singlePacketBuffers[0] = nil
+	}
 	c.dataPlaneAccess.RUnlock()
 	for range packets {
 		completion.complete(err)
