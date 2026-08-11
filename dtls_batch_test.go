@@ -3,11 +3,18 @@ package openconnect
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
+	"encoding/binary"
 	"errors"
 	"net"
 	"runtime"
 	"testing"
 	"time"
+
+	B "github.com/sagernet/sing/common/bufio"
+
+	"github.com/pion/dtls/v3"
+	"github.com/pion/dtls/v3/pkg/crypto/selfsign"
 )
 
 func TestAnyConnectDTLSPacketConnWritesBatch(t *testing.T) {
@@ -188,4 +195,150 @@ func BenchmarkAnyConnectDTLSPacketConnWrite(b *testing.B) {
 			}
 		})
 	}
+}
+
+func BenchmarkAnyConnectDTLSReceive(b *testing.B) {
+	for _, testCase := range []struct {
+		name          string
+		readBatchSize int
+	}{
+		{name: "sequential"},
+		{name: "batch-2", readBatchSize: 2},
+		{name: "batch-4", readBatchSize: 4},
+		{name: "batch-8", readBatchSize: 8},
+		{name: "batch-16", readBatchSize: 16},
+		{name: "batch-32", readBatchSize: 32},
+		{name: "batch-64", readBatchSize: 64},
+	} {
+		b.Run(testCase.name, func(b *testing.B) {
+			benchmarkAnyConnectDTLSReceive(b, testCase.readBatchSize)
+		})
+	}
+}
+
+func benchmarkAnyConnectDTLSReceive(b *testing.B, readBatchSize int) {
+	b.Helper()
+
+	serverPacketConn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		b.Fatal(err)
+	}
+	defer serverPacketConn.Close()
+	clientConn, err := net.DialUDP("udp4", nil, serverPacketConn.LocalAddr().(*net.UDPAddr))
+	if err != nil {
+		b.Fatal(err)
+	}
+	packetConn := net.PacketConn(B.NewUnbindPacketConn(clientConn))
+	if readBatchSize > 0 {
+		packetConn = newAnyConnectDTLSPacketConnWithReadBatchSize(clientConn, readBatchSize)
+		if _, loaded := packetConn.(interface {
+			ReadPacketBatchContext(context.Context) ([][]byte, net.Addr, func(), error)
+		}); !loaded {
+			b.Skip("connected packet batch reads are unavailable on this platform")
+		}
+	}
+	defer packetConn.Close()
+
+	certificate, err := selfsign.GenerateSelfSigned()
+	if err != nil {
+		b.Fatal(err)
+	}
+	const cipherSuite = dtls.TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384
+	serverResult := make(chan struct {
+		conn *dtls.Conn
+		err  error
+	}, 1)
+	go func() {
+		server, serverErr := dtls.Server(serverPacketConn, clientConn.LocalAddr(), &dtls.Config{
+			Certificates: []tls.Certificate{certificate},
+			CipherSuites: []dtls.CipherSuiteID{cipherSuite},
+		})
+		serverResult <- struct {
+			conn *dtls.Conn
+			err  error
+		}{server, serverErr}
+	}()
+	client, err := dtls.Client(packetConn, serverPacketConn.LocalAddr(), &dtls.Config{
+		InsecureSkipVerify:  true,
+		CipherSuites:        []dtls.CipherSuiteID{cipherSuite},
+		DedicatedPacketConn: true,
+	})
+	if err != nil {
+		b.Fatal(err)
+	}
+	defer client.Close()
+	result := <-serverResult
+	if result.err != nil {
+		b.Fatal(result.err)
+	}
+	server := result.conn
+	defer server.Close()
+	deadline := time.Now().Add(30 * time.Second)
+	if err = client.SetReadDeadline(deadline); err != nil {
+		b.Fatal(err)
+	}
+	if err = server.SetWriteDeadline(deadline); err != nil {
+		b.Fatal(err)
+	}
+
+	const payloadSize = 1200
+	payload := make([]byte, payloadSize)
+	binary.BigEndian.PutUint32(payload, uint32(payloadSize))
+	for index := 16; index < len(payload); index++ {
+		payload[index] = byte(index*31 + 17)
+	}
+	const maximumInFlightPackets = 64
+	windowRead := make(chan struct{})
+	writeDone := make(chan error, 1)
+	writeContext, cancelWrite := context.WithCancel(context.Background())
+	defer cancelWrite()
+	b.ReportAllocs()
+	b.SetBytes(payloadSize)
+	b.ResetTimer()
+	go func() {
+		for base := 0; base < b.N; base += maximumInFlightPackets {
+			count := min(maximumInFlightPackets, b.N-base)
+			for offset := range count {
+				sequence := uint64(base + offset)
+				binary.BigEndian.PutUint64(payload[4:12], sequence)
+				binary.BigEndian.PutUint32(payload[12:16], ^uint32(sequence))
+				if _, writeErr := server.Write(payload); writeErr != nil {
+					writeDone <- writeErr
+					return
+				}
+			}
+			select {
+			case <-windowRead:
+			case <-writeContext.Done():
+				writeDone <- writeContext.Err()
+				return
+			}
+		}
+		writeDone <- nil
+	}()
+
+	readBuffer := make([]byte, payloadSize+64)
+	for expected := 0; expected < b.N; expected++ {
+		count, readErr := client.Read(readBuffer)
+		if readErr != nil {
+			b.Fatalf("read packet %d: %v", expected, readErr)
+		}
+		if count != payloadSize || binary.BigEndian.Uint32(readBuffer) != payloadSize ||
+			binary.BigEndian.Uint64(readBuffer[4:12]) != uint64(expected) ||
+			binary.BigEndian.Uint32(readBuffer[12:16]) != ^uint32(expected) {
+			b.Fatalf("invalid packet %d", expected)
+		}
+		for index := 16; index < count; index++ {
+			if readBuffer[index] != byte(index*31+17) {
+				b.Fatalf("packet %d changed at offset %d", expected, index)
+			}
+		}
+		if (expected+1)%maximumInFlightPackets == 0 || expected+1 == b.N {
+			windowRead <- struct{}{}
+		}
+	}
+	if err = <-writeDone; err != nil {
+		b.Fatal(err)
+	}
+	b.StopTimer()
 }

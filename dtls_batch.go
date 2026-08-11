@@ -30,12 +30,16 @@ type anyConnectDTLSBatchReadWritePacketConn struct {
 }
 
 func newAnyConnectDTLSPacketConn(conn net.Conn) net.PacketConn {
+	return newAnyConnectDTLSPacketConnWithReadBatchSize(conn, B.DefaultPacketReadBatchSize)
+}
+
+func newAnyConnectDTLSPacketConnWithReadBatchSize(conn net.Conn, readBatchSize int) net.PacketConn {
 	packetConn := B.NewUnbindPacketConn(conn)
 	batchReader, readLoaded := B.CreateConnectedPacketBatchReadWaiter(packetConn)
 	if readLoaded {
 		batchReader.InitializeReadWaiter(N.ReadWaitOptions{
 			MTU:       8192,
-			BatchSize: B.DefaultPacketReadBatchSize,
+			BatchSize: readBatchSize,
 		})
 	}
 	batchWriter, loaded := B.CreateConnectedPacketBatchWriter(packetConn)
