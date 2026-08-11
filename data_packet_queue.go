@@ -74,6 +74,10 @@ func (q *dataPacketQueue[T]) TryPushBatch(ctx context.Context, items []T) int {
 }
 
 func (q *dataPacketQueue[T]) Pop(maximumItems int) []T {
+	return q.PopInto(nil, maximumItems)
+}
+
+func (q *dataPacketQueue[T]) PopInto(items []T, maximumItems int) []T {
 	q.access.Lock()
 	count := q.length
 	if maximumItems > 0 {
@@ -81,10 +85,14 @@ func (q *dataPacketQueue[T]) Pop(maximumItems int) []T {
 	}
 	if count == 0 {
 		q.access.Unlock()
-		return nil
+		return items[:0]
 	}
 	wasFull := q.length == len(q.items)
-	items := make([]T, count)
+	if cap(items) < count {
+		items = make([]T, count)
+	} else {
+		items = items[:count]
+	}
 	for index := range count {
 		itemIndex := (q.head + index) % len(q.items)
 		items[index] = q.items[itemIndex]

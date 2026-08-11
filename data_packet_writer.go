@@ -97,8 +97,9 @@ func (c *Client) enqueueOutboundDataPacketBuffers(
 
 func (c *Client) runOutgoingDataPacketWriter() {
 	defer close(c.outgoingDataPacketWriterDone)
+	packets := make([]outboundDataPacket, 0, cap(c.outgoingDataPacketSlots))
 	for {
-		packets := c.outgoingDataPackets.Pop(0)
+		packets = c.outgoingDataPackets.PopInto(packets[:0], 0)
 		if len(packets) == 0 {
 			if c.outgoingDataPackets.Closed() {
 				return
@@ -110,14 +111,15 @@ func (c *Client) runOutgoingDataPacketWriter() {
 			c.failQueuedOutboundDataPackets(packets, ErrClientClosed)
 			continue
 		}
-		for len(packets) > 0 {
-			completion := packets[0].completion
+		remainingPackets := packets
+		for len(remainingPackets) > 0 {
+			completion := remainingPackets[0].completion
 			count := 1
-			for count < len(packets) && packets[count].completion == completion {
+			for count < len(remainingPackets) && remainingPackets[count].completion == completion {
 				count++
 			}
-			c.writeQueuedOutboundDataPackets(packets[:count])
-			packets = packets[count:]
+			c.writeQueuedOutboundDataPackets(remainingPackets[:count])
+			remainingPackets = remainingPackets[count:]
 		}
 	}
 }
