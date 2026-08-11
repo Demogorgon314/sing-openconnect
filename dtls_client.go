@@ -148,6 +148,7 @@ func (c *anyConnectDTLSChannel) connectModernPSK(packetConn net.PacketConn, remo
 			dtls.TLS_PSK_WITH_AES_128_CBC_SHA256,
 		),
 		dtls.WithFlightInterval(250 * time.Millisecond),
+		dtls.WithDedicatedPacketConn(),
 	}
 	if len(c.negotiation.AppID) > 0 {
 		applicationID := append([]byte(nil), c.negotiation.AppID...)
@@ -195,6 +196,7 @@ func (c *anyConnectDTLSChannel) connectInjectedResume(packetConn net.PacketConn,
 		dtls.WithSessionStore(sessionStore),
 		dtls.WithExtendedMasterSecret(dtls.DisableExtendedMasterSecret),
 		dtls.WithFlightInterval(250 * time.Millisecond),
+		dtls.WithDedicatedPacketConn(),
 		dtls.WithClientHelloMessageHook(func(message handshake.MessageClientHello) handshake.Message {
 			message.Extensions = nil
 			message.CipherSuiteIDs = []uint16{uint16(cipherSuite)}
