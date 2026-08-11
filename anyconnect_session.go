@@ -186,11 +186,23 @@ func (s *anyConnectCSTPSession) WriteDataPacketBuffers(packetBuffers []*buf.Buff
 	if !s.ready.Load() {
 		return ErrDataChannelNotReady
 	}
-	for index, packetBuffer := range packetBuffers {
-		mtu := s.currentMTU()
+	mtu := s.currentMTU()
+	for _, packetBuffer := range packetBuffers {
 		if packetBuffer.Len() > mtu {
 			return E.New("data packet exceeds negotiated MTU: ", packetBuffer.Len(), " > ", mtu)
 		}
+	}
+	s.dtlsAccess.RLock()
+	dtlsChannel := s.dtls
+	s.dtlsAccess.RUnlock()
+	if dtlsChannel != nil && dtlsChannel.Ready() {
+		if attempted, err := dtlsChannel.writeDataPacketBuffers(packetBuffers); attempted {
+			// A batch syscall can fail after sending an unknown prefix. Do not
+			// replay the whole batch over CSTP and duplicate those packets.
+			return err
+		}
+	}
+	for index := range packetBuffers {
 		s.dtlsAccess.RLock()
 		dtlsChannel := s.dtls
 		s.dtlsAccess.RUnlock()

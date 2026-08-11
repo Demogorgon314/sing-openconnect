@@ -1,3 +1,5 @@
+github.com/Demogorgon314/dtls/v3 v3.1.6-0.20260811061928-ccfbf1bfdfbf h1:HBeFj2C3bOzI6BD2OUNtNb++tPWQl1oQtb8IMFVGqyY=
+github.com/Demogorgon314/dtls/v3 v3.1.6-0.20260811061928-ccfbf1bfdfbf/go.mod h1:gz1K4jg6c+fq86oQMH4pilpCEOEPwmEr2jY+VcF/mkU=
 github.com/anchore/go-lzo v0.1.0 h1:NgAacnzqPeGH49Ky19QKLBZEuFRqtTG9cdaucc3Vncs=
 github.com/anchore/go-lzo v0.1.0/go.mod h1:3kLx0bve2oN1iDwgM1U5zGku1Tfbdb0No5qp1eL1fIk=
 github.com/davecgh/go-spew v1.1.1 h1:vj9j/u1bqnvCEfJOwUhtlOARqs3+rkHYY13jYWTU97c=

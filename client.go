@@ -495,11 +495,20 @@ func (c *Client) WriteDataPacket(packet []byte) error {
 
 // WriteDataPacketAtRevision copies and writes packet only if revision still identifies the ready tunnel configuration.
 func (c *Client) WriteDataPacketAtRevision(packet []byte, revision uint64) error {
+	return c.WriteDataPacketsAtRevision([][]byte{packet}, revision)
+}
+
+// WriteDataPacketsAtRevision copies and writes packets only if revision still
+// identifies the ready tunnel configuration.
+func (c *Client) WriteDataPacketsAtRevision(packets [][]byte, revision uint64) error {
+	if len(packets) == 0 {
+		return nil
+	}
 	session, generation := c.readySessionAtRevision(revision)
 	if session == nil {
 		return ErrDataChannelNotReady
 	}
-	return c.enqueueOutboundDataPacketBuffers(session, generation, revision, newPacketBuffersFrom([][]byte{packet}))
+	return c.enqueueOutboundDataPacketBuffers(session, generation, revision, newPacketBuffersFrom(packets))
 }
 
 // WriteDataPackets copies every packet before returning.

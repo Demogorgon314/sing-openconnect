@@ -145,6 +145,43 @@ func (c *anyConnectDTLSChannel) WriteDataPacketBuffer(packetBuffer **buf.Buffer)
 	return err
 }
 
+func (c *anyConnectDTLSChannel) writeDataPacketBuffers(packetBuffers []*buf.Buffer) (bool, error) {
+	if len(packetBuffers) < 2 || c.negotiation.Compression != anyConnectCompressionNone {
+		return false, nil
+	}
+	c.writeAccess.Lock()
+	defer c.writeAccess.Unlock()
+	if !c.ready.Load() {
+		return false, nil
+	}
+	c.access.RLock()
+	conn := c.conn
+	c.access.RUnlock()
+	batchConn, loaded := conn.(interface{ WritePackets([][]byte) error })
+	if !loaded {
+		return false, nil
+	}
+
+	packets := make([][]byte, len(packetBuffers))
+	for index, packetBuffer := range packetBuffers {
+		packetBuffers[index] = requirePacketBufferCapacity(packetBuffer, 1, 0)
+		header := packetBuffers[index].ExtendHeader(1)
+		header[0] = cstpPacketData
+		packets[index] = packetBuffers[index].Bytes()
+	}
+	err := batchConn.WritePackets(packets)
+	for _, packetBuffer := range packetBuffers {
+		packetBuffer.Advance(1)
+	}
+	if err != nil {
+		wrappedErr := E.Cause(err, "write DTLS packet batch")
+		c.terminate(wrappedErr)
+		return true, wrappedErr
+	}
+	c.lastTransmitted.Store(time.Now().UnixNano())
+	return true, nil
+}
+
 func (c *anyConnectDTLSChannel) writePacket(packet []byte) error {
 	c.writeAccess.Lock()
 	defer c.writeAccess.Unlock()

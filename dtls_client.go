@@ -12,7 +12,6 @@ import (
 	N "github.com/sagernet/sing/common/network"
 
 	"github.com/pion/dtls/v3"
-	dtlsnet "github.com/pion/dtls/v3/pkg/net"
 	"github.com/pion/dtls/v3/pkg/protocol/handshake"
 )
 
@@ -95,7 +94,7 @@ func (c *anyConnectDTLSChannel) connect() (net.Conn, error) {
 		return legacyConn, nil
 	}
 
-	packetConn := dtlsnet.PacketConnFromConn(udpConn)
+	packetConn := newAnyConnectDTLSPacketConn(udpConn)
 	var dtlsConn *dtls.Conn
 	if c.negotiation.CipherSuite == "PSK-NEGOTIATE" {
 		dtlsConn, err = c.connectModernPSK(packetConn, udpConn.RemoteAddr())
