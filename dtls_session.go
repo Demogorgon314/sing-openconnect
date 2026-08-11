@@ -10,6 +10,8 @@ import (
 
 	"github.com/sagernet/sing/common/buf"
 	E "github.com/sagernet/sing/common/exceptions"
+
+	"github.com/pion/dtls/v3"
 )
 
 type anyConnectDTLSChannel struct {
@@ -261,6 +263,24 @@ func (c *anyConnectDTLSChannel) readLoop() {
 }
 
 func readAnyConnectDTLSPackets(conn net.Conn, bufferSize int) ([]*buf.Buffer, error) {
+	if bufferReader, loaded := conn.(interface {
+		ReadApplicationDataBuffers() ([]dtls.ApplicationDataBuffer, error)
+	}); loaded {
+		applicationBuffers, err := bufferReader.ReadApplicationDataBuffers()
+		packetBuffers := make([]*buf.Buffer, len(applicationBuffers))
+		for index, applicationBuffer := range applicationBuffers {
+			if packetBuffer, ok := applicationBuffer.(*buf.Buffer); ok {
+				packetBuffers[index] = packetBuffer
+				continue
+			}
+			data := applicationBuffer.Bytes()
+			packetBuffer := buf.NewSize(len(data))
+			copy(packetBuffer.Extend(len(data)), data)
+			applicationBuffer.Release()
+			packetBuffers[index] = packetBuffer
+		}
+		return packetBuffers, err
+	}
 	if batchReader, loaded := conn.(interface {
 		ReadPackets() ([][]byte, error)
 	}); loaded {

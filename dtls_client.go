@@ -7,6 +7,7 @@ import (
 	"time"
 
 	C "github.com/sagernet/sing/common"
+	"github.com/sagernet/sing/common/buf"
 	E "github.com/sagernet/sing/common/exceptions"
 	"github.com/sagernet/sing/common/logger"
 	M "github.com/sagernet/sing/common/metadata"
@@ -22,6 +23,12 @@ const (
 	anyConnectDTLSHandshake     = 15 * time.Second
 	anyConnectDTLSReadBuffer    = 4 << 20
 )
+
+func newAnyConnectDTLSApplicationDataBuffer(size int) dtls.ApplicationDataBuffer {
+	packetBuffer := buf.NewSize(size)
+	packetBuffer.Extend(size)
+	return packetBuffer
+}
 
 type cstpDTLSNegotiation struct {
 	Address             string
@@ -149,6 +156,7 @@ func (c *anyConnectDTLSChannel) connectModernPSK(packetConn net.PacketConn, remo
 		),
 		dtls.WithFlightInterval(250 * time.Millisecond),
 		dtls.WithDedicatedPacketConn(),
+		dtls.WithApplicationDataBufferAllocator(newAnyConnectDTLSApplicationDataBuffer),
 	}
 	if len(c.negotiation.AppID) > 0 {
 		applicationID := append([]byte(nil), c.negotiation.AppID...)
@@ -197,6 +205,7 @@ func (c *anyConnectDTLSChannel) connectInjectedResume(packetConn net.PacketConn,
 		dtls.WithExtendedMasterSecret(dtls.DisableExtendedMasterSecret),
 		dtls.WithFlightInterval(250 * time.Millisecond),
 		dtls.WithDedicatedPacketConn(),
+		dtls.WithApplicationDataBufferAllocator(newAnyConnectDTLSApplicationDataBuffer),
 		dtls.WithClientHelloMessageHook(func(message handshake.MessageClientHello) handshake.Message {
 			message.Extensions = nil
 			message.CipherSuiteIDs = []uint16{uint16(cipherSuite)}
