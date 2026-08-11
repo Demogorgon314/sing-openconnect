@@ -436,8 +436,8 @@ func (s *anyConnectCSTPSession) dtlsLoop(initialResult chan<- error) {
 	for s.ctx.Err() == nil && s.active.Load() {
 		negotiation := *s.dtlsNegotiation
 		negotiation.MTU = s.currentMTU()
-		channel := newAnyConnectDTLS(s.ctx, negotiation, func(packetBuffer *buf.Buffer) {
-			s.client.pushIncomingDataPacketContext(s.ctx, s, packetBuffer)
+		channel := newAnyConnectDTLS(s.ctx, negotiation, func(packetBuffers []*buf.Buffer) {
+			s.client.pushIncomingDataPacketsContext(s.ctx, s, packetBuffers)
 		})
 		s.dtlsAccess.Lock()
 		if !s.active.Load() {

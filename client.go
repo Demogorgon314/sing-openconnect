@@ -397,18 +397,42 @@ func (c *Client) ReadDataPacket(ctx context.Context) ([]byte, error) {
 
 // ReadDataPacketWithRevision returns a caller-owned copy of the next packet and the tunnel configuration revision that received it.
 func (c *Client) ReadDataPacketWithRevision(ctx context.Context) ([]byte, uint64, error) {
-	packet, err := c.readDataPacket(ctx)
+	packetBuffers, revision, err := c.ReadDataPacketsWithRevision(ctx, 1)
 	if err != nil {
 		return nil, 0, err
 	}
-	payload := append([]byte(nil), packet.packetBuffer.Bytes()...)
-	packet.packetBuffer.Release()
-	return payload, packet.revision, nil
+	payload := append([]byte(nil), packetBuffers[0].Bytes()...)
+	packetBuffers[0].Release()
+	return payload, revision, nil
 }
 
 // ReadDataPackets transfers ownership of the returned buffers to the caller, which must release each buffer.
 func (c *Client) ReadDataPackets(ctx context.Context) ([]*buf.Buffer, error) {
-	return c.readDataPackets(ctx, 0)
+	packetBuffers, _, err := c.ReadDataPacketsWithRevision(ctx, 0)
+	return packetBuffers, err
+}
+
+// ReadDataPacketsWithRevision transfers ownership of up to maximumPackets
+// buffers to the caller. A non-positive maximum returns all currently queued
+// packets. Every returned packet belongs to the returned tunnel revision.
+func (c *Client) ReadDataPacketsWithRevision(ctx context.Context, maximumPackets int) ([]*buf.Buffer, uint64, error) {
+	packets, err := c.readIncomingDataPackets(ctx, maximumPackets)
+	if err != nil {
+		return nil, 0, err
+	}
+	revision := packets[0].revision
+	packetBuffers := make([]*buf.Buffer, len(packets))
+	for index, packet := range packets {
+		if packet.revision != revision {
+			buf.ReleaseMulti(packetBuffers[:index])
+			for _, pendingPacket := range packets[index:] {
+				pendingPacket.packetBuffer.Release()
+			}
+			return nil, 0, E.New("incoming data packet batch spans tunnel revisions")
+		}
+		packetBuffers[index] = packet.packetBuffer
+	}
+	return packetBuffers, revision, nil
 }
 
 // ReadDataPacketBuffer transfers ownership of the returned buffer to the caller, which must release it.
@@ -421,15 +445,8 @@ func (c *Client) ReadDataPacketBuffer(ctx context.Context) (*buf.Buffer, error) 
 }
 
 func (c *Client) readDataPackets(ctx context.Context, maximumPackets int) ([]*buf.Buffer, error) {
-	packets, err := c.readIncomingDataPackets(ctx, maximumPackets)
-	if err != nil {
-		return nil, err
-	}
-	packetBuffers := make([]*buf.Buffer, len(packets))
-	for index, packet := range packets {
-		packetBuffers[index] = packet.packetBuffer
-	}
-	return packetBuffers, nil
+	packetBuffers, _, err := c.ReadDataPacketsWithRevision(ctx, maximumPackets)
+	return packetBuffers, err
 }
 
 func (c *Client) readDataPacket(ctx context.Context) (incomingDataPacket, error) {
@@ -662,11 +679,22 @@ type incomingDataPacket struct {
 }
 
 func (c *Client) pushIncomingDataPacketContext(ctx context.Context, session clientSession, packetBuffer *buf.Buffer) {
-	if packetBuffer == nil {
-		return
+	c.pushIncomingDataPacketsContext(ctx, session, []*buf.Buffer{packetBuffer})
+}
+
+func (c *Client) pushIncomingDataPacketsContext(ctx context.Context, session clientSession, packetBuffers []*buf.Buffer) {
+	validBuffers := packetBuffers[:0]
+	for _, packetBuffer := range packetBuffers {
+		if packetBuffer == nil {
+			continue
+		}
+		if packetBuffer.IsEmpty() {
+			packetBuffer.Release()
+			continue
+		}
+		validBuffers = append(validBuffers, packetBuffer)
 	}
-	if packetBuffer.IsEmpty() {
-		packetBuffer.Release()
+	if len(validBuffers) == 0 {
 		return
 	}
 	c.lifecycleAccess.Lock()
@@ -678,14 +706,20 @@ func (c *Client) pushIncomingDataPacketContext(ctx context.Context, session clie
 	}
 	c.lifecycleAccess.Unlock()
 	if !allowed {
-		c.droppedIncomingDataPackets.Add(1)
-		packetBuffer.Release()
+		c.droppedIncomingDataPackets.Add(uint64(len(validBuffers)))
+		buf.ReleaseMulti(validBuffers)
 		return
 	}
-	packet := incomingDataPacket{generation: generation, revision: revision, packetBuffer: packetBuffer}
-	if c.incomingDataPackets.PushBatch(ctx, []incomingDataPacket{packet}) == 0 {
-		c.droppedIncomingDataPackets.Add(1)
-		packetBuffer.Release()
+	packets := make([]incomingDataPacket, len(validBuffers))
+	for index, packetBuffer := range validBuffers {
+		packets[index] = incomingDataPacket{generation: generation, revision: revision, packetBuffer: packetBuffer}
+	}
+	pushed := c.incomingDataPackets.PushBatch(ctx, packets)
+	if pushed < len(packets) {
+		c.droppedIncomingDataPackets.Add(uint64(len(packets) - pushed))
+		for _, packet := range packets[pushed:] {
+			packet.packetBuffer.Release()
+		}
 	}
 }
 

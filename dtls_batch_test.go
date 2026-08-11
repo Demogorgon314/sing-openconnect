@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"net"
+	"runtime"
 	"testing"
 	"time"
 )
@@ -31,7 +32,10 @@ func TestAnyConnectDTLSPacketConnWritesBatch(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
-	packets := [][]byte{{1}, {2, 2}, {3, 3, 3}}
+	packets := make([][]byte, 16)
+	for index := range packets {
+		packets[index] = bytes.Repeat([]byte{byte(index + 1)}, index+1)
+	}
 	if err = batchConn.WritePacketBatchContext(ctx, packets); err != nil {
 		t.Fatal(err)
 	}
@@ -60,6 +64,71 @@ func TestAnyConnectDTLSPacketConnWritesBatch(t *testing.T) {
 	}
 	if _, _, err = server.ReadFromUDP(readBuffer); err == nil {
 		t.Fatal("canceled batch write sent a packet")
+	}
+}
+
+func TestAnyConnectDTLSPacketConnReadsBatch(t *testing.T) {
+	server, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer server.Close()
+
+	client, err := net.DialUDP("udp", nil, server.LocalAddr().(*net.UDPAddr))
+	if err != nil {
+		t.Fatal(err)
+	}
+	packetConn := newAnyConnectDTLSPacketConn(client)
+	defer packetConn.Close()
+	batchConn, loaded := packetConn.(interface {
+		ReadPacketBatchContext(context.Context) ([][]byte, net.Addr, func(), error)
+	})
+	if !loaded {
+		if runtime.GOOS == "darwin" || runtime.GOOS == "linux" {
+			t.Fatal("connected packet batch reads are unexpectedly unavailable")
+		}
+		t.Skip("connected packet batch reads are unavailable on this platform")
+	}
+
+	packets := [][]byte{{1}, {2, 2}, {3, 3, 3}}
+	for _, packet := range packets {
+		if _, err = server.WriteToUDP(packet, client.LocalAddr().(*net.UDPAddr)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	receivedCount := 0
+	batched := false
+	for receivedCount < len(packets) {
+		received, address, release, readErr := batchConn.ReadPacketBatchContext(ctx)
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		if address.String() != server.LocalAddr().String() {
+			release()
+			t.Fatalf("unexpected batch source: got %s, want %s", address, server.LocalAddr())
+		}
+		if len(received) > 1 {
+			batched = true
+		}
+		for _, packet := range received {
+			if receivedCount >= len(packets) || !bytes.Equal(packets[receivedCount], packet) {
+				release()
+				t.Fatalf("unexpected packet %d: got %x", receivedCount, packet)
+			}
+			receivedCount++
+		}
+		release()
+	}
+	if !batched {
+		t.Fatal("connected packet batch reader returned only singleton batches")
+	}
+
+	canceledContext, cancelRead := context.WithCancel(context.Background())
+	cancelRead()
+	if _, _, _, err = batchConn.ReadPacketBatchContext(canceledContext); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled batch read returned %v", err)
 	}
 }
 

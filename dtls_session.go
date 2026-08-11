@@ -16,7 +16,7 @@ type anyConnectDTLSChannel struct {
 	ctx             context.Context
 	cancel          context.CancelFunc
 	negotiation     cstpDTLSNegotiation
-	deliver         func(*buf.Buffer)
+	deliver         func([]*buf.Buffer)
 	done            chan error
 	doneOnce        sync.Once
 	access          sync.RWMutex
@@ -37,7 +37,7 @@ type anyConnectDTLSChannel struct {
 func newAnyConnectDTLS(
 	ctx context.Context,
 	negotiation cstpDTLSNegotiation,
-	deliver func(*buf.Buffer),
+	deliver func([]*buf.Buffer),
 ) *anyConnectDTLSChannel {
 	channelCtx, cancel := context.WithCancel(ctx)
 	return &anyConnectDTLSChannel{
@@ -220,63 +220,101 @@ func (c *anyConnectDTLSChannel) readLoop() {
 		if conn == nil {
 			return
 		}
-		packetBuffer := newPacketBuffer(bufferSize)
-		n, err := conn.Read(packetBuffer.FreeBytes())
-		if err != nil {
-			packetBuffer.Release()
-			if c.ctx.Err() == nil && err != io.EOF {
-				c.terminate(E.Cause(err, "read DTLS packet"))
+		packetBuffers, readErr := readAnyConnectDTLSPackets(conn, bufferSize)
+		if len(packetBuffers) == 0 && readErr == nil {
+			continue
+		}
+		c.lastReceived.Store(time.Now().UnixNano())
+		deliverable := make([]*buf.Buffer, 0, len(packetBuffers))
+		for index, packetBuffer := range packetBuffers {
+			delivery, stop, err := c.handleIncomingPacket(packetBuffer, maximumPayloadSize)
+			if delivery != nil {
+				deliverable = append(deliverable, delivery)
+			}
+			if stop {
+				buf.ReleaseMulti(deliverable)
+				buf.ReleaseMulti(packetBuffers[index+1:])
+				if err != nil && c.ctx.Err() == nil && err != io.EOF {
+					c.terminate(E.Cause(err, "read DTLS packet"))
+				} else {
+					c.terminate(nil)
+				}
+				return
+			}
+		}
+		if len(deliverable) > 0 {
+			if c.deliver != nil {
+				c.deliver(deliverable)
+			} else {
+				buf.ReleaseMulti(deliverable)
+			}
+		}
+		if readErr != nil {
+			if c.ctx.Err() == nil && readErr != io.EOF {
+				c.terminate(E.Cause(readErr, "read DTLS packet"))
 			} else {
 				c.terminate(nil)
 			}
 			return
 		}
-		if n == 0 {
-			packetBuffer.Release()
-			continue
+	}
+}
+
+func readAnyConnectDTLSPackets(conn net.Conn, bufferSize int) ([]*buf.Buffer, error) {
+	if batchReader, loaded := conn.(interface {
+		ReadPackets() ([][]byte, error)
+	}); loaded {
+		packets, err := batchReader.ReadPackets()
+		packetBuffers := make([]*buf.Buffer, len(packets))
+		for index, packet := range packets {
+			packetBuffers[index] = buf.As(packet)
 		}
-		packetBuffer.Extend(n)
-		c.lastReceived.Store(time.Now().UnixNano())
-		switch packetBuffer.Byte(0) {
-		case cstpPacketData:
-			packetBuffer.Advance(1)
-			if c.deliver != nil {
-				c.deliver(packetBuffer)
-			} else {
-				packetBuffer.Release()
-			}
-		case cstpPacketDPDRequest:
-			packetBuffer.Release()
-			err = c.writePacket([]byte{cstpPacketDPDResponse})
-			if err != nil {
-				return
-			}
-		case cstpPacketDPDResponse, cstpPacketKeepalive:
-			packetBuffer.Release()
-		case cstpPacketCompressed:
-			if c.negotiation.Compression == anyConnectCompressionNone {
-				packetBuffer.Release()
-				c.terminate(E.Extend(ErrProtocolNotSupported, "received compressed DTLS packet without negotiated compression"))
-				return
-			}
-			packetBuffer.Advance(1)
-			decompressedPacket, decompressErr := decompressAnyConnectStatelessPacket(c.negotiation.Compression, packetBuffer.Bytes(), maximumPayloadSize)
-			packetBuffer.Release()
-			if decompressErr != nil {
-				if c.negotiation.Logger != nil {
-					c.negotiation.Logger.DebugContext(c.ctx, "Ignoring invalid ", c.negotiation.Compression.String(), "-compressed DTLS packet: ", decompressErr)
-				}
-				continue
-			}
-			if c.deliver != nil {
-				c.deliver(decompressedPacket)
-			} else {
-				decompressedPacket.Release()
-			}
-		default:
-			packetBuffer.Release()
-			// Upstream dtls_mainloop ignores unknown packet types because some OpenSSL versions return out-of-order record garbage in non-blocking mode.
+		return packetBuffers, err
+	}
+	packetBuffer := newPacketBuffer(bufferSize)
+	count, err := conn.Read(packetBuffer.FreeBytes())
+	if count == 0 {
+		packetBuffer.Release()
+		return nil, err
+	}
+	packetBuffer.Extend(count)
+	return []*buf.Buffer{packetBuffer}, err
+}
+
+func (c *anyConnectDTLSChannel) handleIncomingPacket(packetBuffer *buf.Buffer, maximumPayloadSize int) (*buf.Buffer, bool, error) {
+	switch packetBuffer.Byte(0) {
+	case cstpPacketData:
+		packetBuffer.Advance(1)
+		return packetBuffer, false, nil
+	case cstpPacketDPDRequest:
+		packetBuffer.Release()
+		err := c.writePacket([]byte{cstpPacketDPDResponse})
+		if err != nil {
+			return nil, true, err
 		}
+		return nil, false, nil
+	case cstpPacketDPDResponse, cstpPacketKeepalive:
+		packetBuffer.Release()
+		return nil, false, nil
+	case cstpPacketCompressed:
+		if c.negotiation.Compression == anyConnectCompressionNone {
+			packetBuffer.Release()
+			return nil, true, E.Extend(ErrProtocolNotSupported, "received compressed DTLS packet without negotiated compression")
+		}
+		packetBuffer.Advance(1)
+		decompressedPacket, decompressErr := decompressAnyConnectStatelessPacket(c.negotiation.Compression, packetBuffer.Bytes(), maximumPayloadSize)
+		packetBuffer.Release()
+		if decompressErr != nil {
+			if c.negotiation.Logger != nil {
+				c.negotiation.Logger.DebugContext(c.ctx, "Ignoring invalid ", c.negotiation.Compression.String(), "-compressed DTLS packet: ", decompressErr)
+			}
+			return nil, false, nil
+		}
+		return decompressedPacket, false, nil
+	default:
+		packetBuffer.Release()
+		// Upstream dtls_mainloop ignores unknown packet types because some OpenSSL versions return out-of-order record garbage in non-blocking mode.
+		return nil, false, nil
 	}
 }
 

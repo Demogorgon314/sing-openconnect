@@ -104,6 +104,27 @@ func TestClientIncomingDataPacketCarriesConfigurationRevision(t *testing.T) {
 	if packetRevision != revision || len(packet) != 1 || packet[0] != 1 {
 		t.Fatalf("unexpected revision-tagged packet: revision=%d packet=%v", packetRevision, packet)
 	}
+	batchBuffers := make([]*buf.Buffer, 3)
+	for index := range batchBuffers {
+		batchBuffers[index] = buf.NewSize(1)
+		_, _ = batchBuffers[index].Write([]byte{byte(index + 7)})
+	}
+	client.pushIncomingDataPacketsContext(context.Background(), session, batchBuffers)
+	batch, batchRevision, err := client.ReadDataPacketsWithRevision(context.Background(), len(batchBuffers))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if batchRevision != revision || len(batch) != len(batchBuffers) {
+		buf.ReleaseMulti(batch)
+		t.Fatalf("unexpected revision-tagged batch: revision=%d packets=%d", batchRevision, len(batch))
+	}
+	for index, packetBuffer := range batch {
+		if packetBuffer.Len() != 1 || packetBuffer.Byte(0) != byte(index+7) {
+			buf.ReleaseMulti(batch)
+			t.Fatalf("unexpected batch packet %d: %v", index, packetBuffer.Bytes())
+		}
+	}
+	buf.ReleaseMulti(batch)
 	oldRevisionBuffer := buf.NewSize(1)
 	_, _ = oldRevisionBuffer.Write([]byte{2})
 	client.pushIncomingDataPacketContext(context.Background(), session, oldRevisionBuffer)
