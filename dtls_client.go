@@ -6,6 +6,7 @@ import (
 	"net"
 	"time"
 
+	C "github.com/sagernet/sing/common"
 	E "github.com/sagernet/sing/common/exceptions"
 	"github.com/sagernet/sing/common/logger"
 	M "github.com/sagernet/sing/common/metadata"
@@ -19,6 +20,7 @@ const (
 	anyConnectDTLSExporterLabel = "EXPORTER-openconnect-psk"
 	anyConnectDTLSPSKIdentity   = "psk"
 	anyConnectDTLSHandshake     = 15 * time.Second
+	anyConnectDTLSReadBuffer    = 4 << 20
 )
 
 type cstpDTLSNegotiation struct {
@@ -45,6 +47,12 @@ type cstpDTLSNegotiation struct {
 
 type anyConnectDTLSSessionStore struct {
 	session dtls.Session
+}
+
+func setAnyConnectDTLSReadBuffer(connection any) {
+	if readBufferConn, loaded := C.Cast[interface{ SetReadBuffer(int) error }](connection); loaded {
+		_ = readBufferConn.SetReadBuffer(anyConnectDTLSReadBuffer)
+	}
 }
 
 func (s *anyConnectDTLSSessionStore) Set(_ []byte, session dtls.Session) error {
@@ -78,6 +86,7 @@ func (c *anyConnectDTLSChannel) connect() (net.Conn, error) {
 	if err != nil {
 		return nil, E.Cause(err, "connect DTLS UDP transport")
 	}
+	setAnyConnectDTLSReadBuffer(udpConn)
 
 	if isAnyConnectLegacyDTLS(c.negotiation.CipherSuite, c.negotiation.DTLS12) {
 		if c.negotiation.LegacyDTLSDisabled {
