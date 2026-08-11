@@ -19,7 +19,7 @@ type outboundDataPacketCompletion struct {
 	access    sync.Mutex
 	remaining int
 	err       error
-	done      chan struct{}
+	done      chan error
 }
 
 func (c *outboundDataPacketCompletion) complete(err error) {
@@ -29,7 +29,7 @@ func (c *outboundDataPacketCompletion) complete(err error) {
 	}
 	c.remaining--
 	if c.remaining == 0 {
-		close(c.done)
+		c.done <- c.err
 	}
 	c.access.Unlock()
 }
@@ -41,10 +41,21 @@ func (c *outboundDataPacketCompletion) failed() bool {
 }
 
 func (c *outboundDataPacketCompletion) wait() error {
-	<-c.done
-	c.access.Lock()
-	defer c.access.Unlock()
-	return c.err
+	return <-c.done
+}
+
+func (c *Client) acquireOutboundDataPacketCompletion(remaining int) *outboundDataPacketCompletion {
+	completion, loaded := c.outgoingDataPacketCompletions.Get().(*outboundDataPacketCompletion)
+	if !loaded {
+		completion = &outboundDataPacketCompletion{done: make(chan error, 1)}
+	}
+	completion.remaining = remaining
+	completion.err = nil
+	return completion
+}
+
+func (c *Client) releaseOutboundDataPacketCompletion(completion *outboundDataPacketCompletion) {
+	c.outgoingDataPacketCompletions.Put(completion)
 }
 
 func (c *Client) enqueueOutboundDataPacketBuffers(
@@ -53,10 +64,8 @@ func (c *Client) enqueueOutboundDataPacketBuffers(
 	revision uint64,
 	packetBuffers []*buf.Buffer,
 ) error {
-	completion := &outboundDataPacketCompletion{
-		remaining: len(packetBuffers),
-		done:      make(chan struct{}),
-	}
+	completion := c.acquireOutboundDataPacketCompletion(len(packetBuffers))
+	defer c.releaseOutboundDataPacketCompletion(completion)
 	packets := make([]outboundDataPacket, len(packetBuffers))
 	for index, packetBuffer := range packetBuffers {
 		packets[index] = outboundDataPacket{

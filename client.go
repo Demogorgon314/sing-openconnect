@@ -57,6 +57,7 @@ type Client struct {
 	outgoingDataPacketSlots         chan struct{}
 	outgoingDataPacketClosed        chan struct{}
 	outgoingDataPacketWriterDone    chan struct{}
+	outgoingDataPacketCompletions   sync.Pool
 	dataPlaneAccess                 sync.RWMutex
 	lifecycleAccess                 sync.Mutex
 	started                         bool
