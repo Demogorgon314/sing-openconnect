@@ -13,6 +13,7 @@ import (
 	pioncipher "github.com/pion/dtls/v3/pkg/crypto/ciphersuite"
 	"github.com/pion/dtls/v3/pkg/crypto/clientcertificate"
 	"github.com/pion/dtls/v3/pkg/crypto/prf"
+	"github.com/pion/dtls/v3/pkg/protocol"
 	"github.com/pion/dtls/v3/pkg/protocol/recordlayer"
 )
 
@@ -28,6 +29,10 @@ const (
 type anyConnectPionRecordCipher interface {
 	Encrypt(packet *recordlayer.RecordLayer, raw []byte) ([]byte, error)
 	Decrypt(header recordlayer.Header, raw []byte) ([]byte, error)
+}
+
+type anyConnectPionApplicationDataCipher interface {
+	EncryptApplicationData(header *recordlayer.Header, payload []byte) ([]byte, error)
 }
 
 type anyConnectPionCipherSuite struct {
@@ -143,6 +148,31 @@ func (c *anyConnectPionCipherSuite) Encrypt(packet *recordlayer.RecordLayer, raw
 		return nil, E.New("Cisco DTLS 1.2 cipher suite is not initialized")
 	}
 	return protection.Encrypt(packet, raw)
+}
+
+func (c *anyConnectPionCipherSuite) EncryptApplicationData(
+	header *recordlayer.Header,
+	payload []byte,
+) ([]byte, error) {
+	value := c.protection.Load()
+	protection, loaded := value.(anyConnectPionRecordCipher)
+	if !loaded {
+		return nil, E.New("Cisco DTLS 1.2 cipher suite is not initialized")
+	}
+	if applicationCipher, fastPath := protection.(anyConnectPionApplicationDataCipher); fastPath {
+		return applicationCipher.EncryptApplicationData(header, payload)
+	}
+
+	record := &recordlayer.RecordLayer{
+		Header:  *header,
+		Content: &protocol.ApplicationData{Data: payload},
+	}
+	raw, err := record.Marshal()
+	if err != nil {
+		return nil, err
+	}
+
+	return protection.Encrypt(record, raw)
 }
 
 func (c *anyConnectPionCipherSuite) Decrypt(header recordlayer.Header, raw []byte) ([]byte, error) {
