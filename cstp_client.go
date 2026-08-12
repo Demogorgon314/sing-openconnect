@@ -138,7 +138,11 @@ func connectCSTP(ctx context.Context, client *Client, session *anyConnectSession
 			return nil, E.Cause(err, "generate AnyConnect legacy DTLS master secret")
 		}
 	}
-	request, err := buildCSTPConnectRequest(client, sessionSnapshot, masterSecret, rawConnection.RemoteAddr())
+	baseMTU := client.options.BaseMTU
+	if baseMTU == 0 {
+		baseMTU = probeCSTPBaseMTU(rawConnection)
+	}
+	request, err := buildCSTPConnectRequest(client, sessionSnapshot, masterSecret, rawConnection.RemoteAddr(), baseMTU)
 	if err != nil {
 		return nil, markTerminal(err)
 	}
@@ -287,11 +291,12 @@ func buildCSTPConnectRequest(
 	session *anyConnectSessionState,
 	masterSecret []byte,
 	remoteAddress net.Addr,
+	baseMTU uint32,
 ) ([]byte, error) {
 	serverURL := session.ServerURL
 	userAgent := anyConnectUserAgent(client)
 	localHostname := client.options.LocalHostname
-	baseMTU, tunnelMTU := calculateCSTPRequestMTU(client.options.BaseMTU, client.options.MTU, remoteAddress)
+	baseMTU, tunnelMTU := calculateCSTPRequestMTU(baseMTU, client.options.MTU, remoteAddress)
 	for name, value := range map[string]string{
 		"server":         serverURL.Host,
 		"user agent":     userAgent,
