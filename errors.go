@@ -7,6 +7,7 @@ var (
 	ErrUnsupportedFlavor            = E.New("unsupported openconnect flavor")
 	ErrClientClosed                 = E.New("client is closed")
 	ErrDataChannelNotReady          = E.New("data channel is not ready")
+	ErrDataPacketDeliveryUnknown    = E.New("data packet delivery state is unknown")
 	ErrNoPendingAuthChallenge       = E.New("no pending openconnect authentication challenge")
 	ErrAuthChallengeNotAnswerable   = E.New("authentication challenge does not accept a response")
 	ErrAuthChallengeCanceled        = E.New("authentication challenge canceled")

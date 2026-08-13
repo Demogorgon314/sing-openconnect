@@ -178,7 +178,7 @@ func (c *anyConnectDTLSChannel) writeDataPacketBuffers(packetBuffers []*buf.Buff
 	if err != nil {
 		wrappedErr := E.Cause(err, "write DTLS packet batch")
 		c.terminate(wrappedErr)
-		return true, wrappedErr
+		return true, E.Errors(ErrDataPacketDeliveryUnknown, wrappedErr)
 	}
 	c.lastTransmitted.Store(time.Now().UnixNano())
 	return true, nil

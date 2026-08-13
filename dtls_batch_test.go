@@ -11,11 +11,20 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sagernet/sing/common/buf"
 	B "github.com/sagernet/sing/common/bufio"
 
 	"github.com/pion/dtls/v3"
 	"github.com/pion/dtls/v3/pkg/crypto/selfsign"
 )
+
+type failingAnyConnectDTLSBatchConn struct {
+	net.Conn
+	err error
+}
+
+func (c *failingAnyConnectDTLSBatchConn) WritePackets([][]byte) error { return c.err }
+func (c *failingAnyConnectDTLSBatchConn) Close() error                { return nil }
 
 func TestAnyConnectDTLSPacketConnWritesBatch(t *testing.T) {
 	server, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
@@ -136,6 +145,31 @@ func TestAnyConnectDTLSPacketConnReadsBatch(t *testing.T) {
 	cancelRead()
 	if _, _, _, err = batchConn.ReadPacketBatchContext(canceledContext); !errors.Is(err, context.Canceled) {
 		t.Fatalf("canceled batch read returned %v", err)
+	}
+}
+
+func TestAnyConnectDTLSBatchWriteReportsUnknownDelivery(t *testing.T) {
+	writeErr := errors.New("injected batch write failure")
+	channel := newAnyConnectDTLS(context.Background(), cstpDTLSNegotiation{
+		Compression: anyConnectCompressionNone,
+	}, nil)
+	channel.conn = &failingAnyConnectDTLSBatchConn{err: writeErr}
+	channel.ready.Store(true)
+	packetBuffers := []*buf.Buffer{
+		newPacketBufferFrom([]byte{0x45, 1}),
+		newPacketBufferFrom([]byte{0x45, 2}),
+	}
+	defer buf.ReleaseMulti(packetBuffers)
+
+	attempted, err := channel.writeDataPacketBuffers(packetBuffers)
+	if !attempted {
+		t.Fatal("DTLS batch writer did not attempt the batch")
+	}
+	if !errors.Is(err, ErrDataPacketDeliveryUnknown) || !errors.Is(err, writeErr) {
+		t.Fatalf("unexpected batch write error: %v", err)
+	}
+	if channel.Ready() {
+		t.Fatal("failed DTLS batch write left the channel ready")
 	}
 }
 
