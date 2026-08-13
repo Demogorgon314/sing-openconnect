@@ -9,6 +9,8 @@ require (
 
 replace github.com/sagernet/sing-openconnect => ..
 
+replace github.com/pion/dtls/v3 => github.com/Demogorgon314/dtls/v3 v3.1.6-0.20260813024800-71e5e4d15116
+
 require (
 	github.com/anchore/go-lzo v0.1.0 // indirect
 	github.com/google/certificate-transparency-go v1.3.2 // indirect
