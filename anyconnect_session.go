@@ -258,7 +258,7 @@ func (s *anyConnectCSTPSession) writeDataPacketBuffers(packetBuffers []*buf.Buff
 		if err != nil {
 			s.writeAccess.Unlock()
 			s.terminate(err)
-			return err
+			return E.Errors(ErrDataPacketDeliveryUnknown, err)
 		}
 		s.keepalive.markTransmitted()
 	}
