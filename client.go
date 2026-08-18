@@ -58,6 +58,7 @@ type Client struct {
 	outgoingDataPacketClosed        chan struct{}
 	outgoingDataPacketWriterDone    chan struct{}
 	outgoingDataPacketCompletions   sync.Pool
+	outgoingDataPacketWriteAccess   sync.Mutex
 	dataPlaneAccess                 sync.RWMutex
 	lifecycleAccess                 sync.Mutex
 	started                         bool
@@ -532,6 +533,42 @@ func (c *Client) WriteDataPacketsAtRevision(packets [][]byte, revision uint64) e
 		return c.enqueueOutboundDataPacketBuffers(session, generation, revision, packetBuffers[:])
 	}
 	return c.enqueueOutboundDataPacketBuffers(session, generation, revision, newPacketBuffersFrom(packets))
+}
+
+// WriteDataPacketsDirectAtRevision synchronously copies and writes packets
+// only if revision still identifies the ready tunnel configuration. Direct
+// writes bypass the outgoing queue and are serialized with queued writes.
+func (c *Client) WriteDataPacketsDirectAtRevision(packets [][]byte, revision uint64) error {
+	if len(packets) == 0 {
+		return nil
+	}
+	c.outgoingDataPacketWriteAccess.Lock()
+	defer c.outgoingDataPacketWriteAccess.Unlock()
+	session, generation := c.readySessionAtRevision(revision)
+	if session == nil {
+		return ErrDataChannelNotReady
+	}
+	var packetBuffers []*buf.Buffer
+	var singlePacketBuffer [1]*buf.Buffer
+	if len(packets) == 1 {
+		singlePacketBuffer[0] = newPacketBufferFrom(packets[0])
+		packetBuffers = singlePacketBuffer[:]
+	} else {
+		packetBuffers = newPacketBuffersFrom(packets)
+	}
+	c.dataPlaneAccess.RLock()
+	if !c.outboundDataPacketCurrent(outboundDataPacket{
+		session:    session,
+		generation: generation,
+		revision:   revision,
+	}) {
+		c.dataPlaneAccess.RUnlock()
+		buf.ReleaseMulti(packetBuffers)
+		return ErrDataChannelNotReady
+	}
+	err := session.WriteDataPacketBuffers(packetBuffers)
+	c.dataPlaneAccess.RUnlock()
+	return err
 }
 
 // WriteDataPackets copies every packet before returning.

@@ -144,9 +144,11 @@ func (c *Client) writeQueuedOutboundDataPackets(packets []outboundDataPacket) {
 		return
 	}
 	// Keep revision/session transitions behind this packet's protocol write.
+	c.outgoingDataPacketWriteAccess.Lock()
 	c.dataPlaneAccess.RLock()
 	if !c.outboundDataPacketCurrent(packets[0]) {
 		c.dataPlaneAccess.RUnlock()
+		c.outgoingDataPacketWriteAccess.Unlock()
 		c.failQueuedOutboundDataPackets(packets, ErrDataChannelNotReady)
 		return
 	}
@@ -164,6 +166,7 @@ func (c *Client) writeQueuedOutboundDataPackets(packets []outboundDataPacket) {
 		completion.singlePacketBuffers[0] = nil
 	}
 	c.dataPlaneAccess.RUnlock()
+	c.outgoingDataPacketWriteAccess.Unlock()
 	for range packets {
 		completion.complete(err)
 		<-c.outgoingDataPacketSlots

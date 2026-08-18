@@ -44,6 +44,40 @@ func (s *blockingWriterTestSession) unblock() {
 	})
 }
 
+func (s *blockingWriterTestSession) Close() error {
+	s.unblock()
+	return nil
+}
+
+func publishTestRevisionBehindBlockedWrite(t *testing.T, client *Client, configuration TunnelConfiguration) <-chan struct{} {
+	t.Helper()
+	configuration, revision := client.setTunnelConfiguration(configuration)
+	publishDone := make(chan struct{})
+	go func() {
+		client.publishTunnelConfigurationEvent(TunnelConfigurationEventPathMTU, revision, configuration)
+		close(publishDone)
+	}()
+	deadline := time.NewTimer(time.Second)
+	defer deadline.Stop()
+	// A queued RWMutex writer prevents new readers. TryRLock failing proves
+	// the revision publisher reached the gate behind the active packet write.
+	for client.dataPlaneAccess.TryRLock() {
+		client.dataPlaneAccess.RUnlock()
+		select {
+		case <-deadline.C:
+			t.Fatal("revision publisher did not queue behind the active write")
+		default:
+			runtime.Gosched()
+		}
+	}
+	select {
+	case <-publishDone:
+		t.Fatal("revision publication crossed a blocked data-plane write")
+	default:
+	}
+	return publishDone
+}
+
 func TestClientQueuedWriteRejectsStaleRevision(t *testing.T) {
 	client := newWaitReadyTestClient(t)
 	client.lifecycleAccess.Lock()
@@ -95,33 +129,7 @@ func TestClientQueuedWriteRejectsStaleRevision(t *testing.T) {
 		}
 	}
 
-	configuration, secondRevision := client.setTunnelConfiguration(TunnelConfiguration{MTU: 1300})
-	publishStarted := make(chan struct{})
-	publishDone := make(chan struct{})
-	go func() {
-		close(publishStarted)
-		client.publishTunnelConfigurationEvent(TunnelConfigurationEventPathMTU, secondRevision, configuration)
-		close(publishDone)
-	}()
-	<-publishStarted
-	publisherDeadline := time.NewTimer(time.Second)
-	defer publisherDeadline.Stop()
-	// A queued RWMutex writer prevents new readers; TryRLock failing proves the
-	// revision publisher reached the gate behind the active packet write.
-	for client.dataPlaneAccess.TryRLock() {
-		client.dataPlaneAccess.RUnlock()
-		select {
-		case <-publisherDeadline.C:
-			t.Fatal("revision publisher did not queue behind the active write")
-		default:
-			runtime.Gosched()
-		}
-	}
-	select {
-	case <-publishDone:
-		t.Fatal("revision publication crossed a blocked data-plane write")
-	default:
-	}
+	publishDone := publishTestRevisionBehindBlockedWrite(t, client, TunnelConfiguration{MTU: 1300})
 	session.unblock()
 	if err := <-firstDone; err != nil {
 		t.Fatalf("first write failed: %v", err)
@@ -139,6 +147,97 @@ func TestClientQueuedWriteRejectsStaleRevision(t *testing.T) {
 	defer session.access.Unlock()
 	if session.writeCalls != 1 || len(session.writtenPackets) != 1 || len(session.writtenPackets[0]) != 1 || session.writtenPackets[0][0] != 1 {
 		t.Fatalf("stale packet reached the session: calls=%d packets=%v", session.writeCalls, session.writtenPackets)
+	}
+}
+
+func TestClientDirectWriteRejectsStaleRevision(t *testing.T) {
+	client := newWaitReadyTestClient(t)
+	if err := client.WriteDataPacketsDirectAtRevision(nil, 0); err != nil {
+		t.Fatalf("empty direct write failed: %v", err)
+	}
+	session := &blockingWriterTestSession{
+		waitReadyTestSession: waitReadyTestSession{
+			configuration: TunnelConfiguration{MTU: 1400},
+			ready:         true,
+		},
+		firstWriteStarted: make(chan struct{}),
+		releaseFirstWrite: make(chan struct{}),
+	}
+	t.Cleanup(session.unblock)
+	firstRevision := installWaitReadyTestSession(t, client, session, session.configuration)
+
+	firstDone := make(chan error, 1)
+	go func() {
+		firstDone <- client.WriteDataPacketsDirectAtRevision([][]byte{{1}}, firstRevision)
+	}()
+	select {
+	case <-session.firstWriteStarted:
+	case <-time.After(time.Second):
+		t.Fatal("first direct write did not reach the session")
+	}
+	if client.outgoingDataPacketWriteAccess.TryLock() {
+		client.outgoingDataPacketWriteAccess.Unlock()
+		t.Fatal("direct write did not hold the shared write lock")
+	}
+
+	publishDone := publishTestRevisionBehindBlockedWrite(t, client, TunnelConfiguration{MTU: 1300})
+	session.unblock()
+	if err := <-firstDone; err != nil {
+		t.Fatalf("first direct write failed: %v", err)
+	}
+	select {
+	case <-publishDone:
+	case <-time.After(time.Second):
+		t.Fatal("revision publication did not complete after the direct write returned")
+	}
+	if err := client.WriteDataPacketsDirectAtRevision([][]byte{{2}}, firstRevision); !errors.Is(err, ErrDataChannelNotReady) {
+		t.Fatalf("stale direct write was not rejected: %v", err)
+	}
+
+	session.access.Lock()
+	defer session.access.Unlock()
+	if session.writeCalls != 1 || len(session.writtenPackets) != 1 || len(session.writtenPackets[0]) != 1 || session.writtenPackets[0][0] != 1 {
+		t.Fatalf("stale direct packet reached the session: calls=%d packets=%v", session.writeCalls, session.writtenPackets)
+	}
+}
+
+func TestClientCloseUnblocksDirectWrite(t *testing.T) {
+	client := newWaitReadyTestClient(t)
+	session := &blockingWriterTestSession{
+		waitReadyTestSession: waitReadyTestSession{
+			configuration: TunnelConfiguration{MTU: 1400},
+			ready:         true,
+		},
+		firstWriteStarted: make(chan struct{}),
+		releaseFirstWrite: make(chan struct{}),
+	}
+	revision := installWaitReadyTestSession(t, client, session, session.configuration)
+	writeDone := make(chan error, 1)
+	go func() {
+		writeDone <- client.WriteDataPacketsDirectAtRevision([][]byte{{1}}, revision)
+	}()
+	select {
+	case <-session.firstWriteStarted:
+	case <-time.After(time.Second):
+		t.Fatal("direct write did not reach the session")
+	}
+	closeDone := make(chan error, 1)
+	go func() { closeDone <- client.Close() }()
+	select {
+	case err := <-writeDone:
+		if err != nil {
+			t.Fatalf("unexpected direct write result after Close: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Close did not unblock the direct write")
+	}
+	select {
+	case err := <-closeDone:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Close did not drain the direct write gate")
 	}
 }
 
