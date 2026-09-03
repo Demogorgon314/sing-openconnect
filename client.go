@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/sagernet/sing/common/buf"
@@ -57,6 +58,8 @@ type Client struct {
 	lifecycleAccess              sync.Mutex
 	started                      bool
 	closed                       bool
+	suspended                    atomic.Bool
+	resumed                      chan struct{}
 	terminalError                error
 	currentSession               clientSession
 	publishedSession             clientSession
@@ -377,6 +380,61 @@ func (c *Client) RestartSession() {
 	c.httpTransport.CloseIdleConnections()
 	if session != nil {
 		session.Fail(E.New("session restart requested"))
+	}
+}
+
+func (c *Client) Suspend() {
+	c.lifecycleAccess.Lock()
+	if c.suspended.Load() || c.closed {
+		c.lifecycleAccess.Unlock()
+		return
+	}
+	c.suspended.Store(true)
+	c.resumed = make(chan struct{})
+	session := c.publishedSession
+	c.lifecycleAccess.Unlock()
+	c.httpTransport.CloseIdleConnections()
+	if session != nil {
+		session.Fail(ErrClientSuspended)
+	}
+}
+
+func (c *Client) Resume() {
+	if !c.suspended.Load() {
+		return
+	}
+	c.lifecycleAccess.Lock()
+	if !c.suspended.Load() {
+		c.lifecycleAccess.Unlock()
+		return
+	}
+	c.suspended.Store(false)
+	close(c.resumed)
+	c.lifecycleAccess.Unlock()
+}
+
+func (c *Client) WaitReady(ctx context.Context) error {
+	for {
+		c.lifecycleAccess.Lock()
+		stateChanged := c.stateChanged
+		terminalError := c.terminalError
+		closed := c.closed
+		ready := c.currentSession != nil && c.publishedSession == c.currentSession && c.currentSession.Ready()
+		c.lifecycleAccess.Unlock()
+		if terminalError != nil {
+			return terminalError
+		}
+		if closed {
+			return ErrClientClosed
+		}
+		if ready {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-stateChanged:
+		}
 	}
 }
 

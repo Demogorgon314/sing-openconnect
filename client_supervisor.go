@@ -3,6 +3,7 @@ package openconnect
 import (
 	"context"
 	"crypto/x509"
+	"errors"
 	"time"
 
 	"github.com/sagernet/sing/common/buf"
@@ -84,6 +85,10 @@ func (c *Client) runSupervisor(ctx context.Context) {
 	var reconnectTimeoutRemaining time.Duration
 	for {
 		if ctx.Err() != nil || c.isClosed() {
+			_ = closeObtainedSession(sessionState)
+			return
+		}
+		if !c.waitResumed(ctx) {
 			_ = closeObtainedSession(sessionState)
 			return
 		}
@@ -246,6 +251,9 @@ func (c *Client) runSupervisor(ctx context.Context) {
 				c.options.Logger.InfoContext(ctx, c.options.Flavor, " tunnel re-established using ", c.ActiveTransport())
 			}
 		}
+		if c.isSuspended() {
+			session.Fail(ErrClientSuspended)
+		}
 		var sessionErr error
 		select {
 		case <-ctx.Done():
@@ -264,6 +272,10 @@ func (c *Client) runSupervisor(ctx context.Context) {
 		if ctx.Err() != nil || c.isClosed() {
 			_ = closeObtainedSession(sessionState)
 			return
+		}
+		if errors.Is(sessionErr, ErrClientSuspended) || c.isSuspended() {
+			backoff = clientReconnectInitialBackoff
+			continue
 		}
 		if E.IsMulti(sessionErr, ErrSessionRejected) {
 			_ = closeObtainedSession(sessionState)
@@ -477,6 +489,28 @@ func (c *Client) isClosed() bool {
 	c.lifecycleAccess.Lock()
 	defer c.lifecycleAccess.Unlock()
 	return c.closed
+}
+
+func (c *Client) isSuspended() bool {
+	c.lifecycleAccess.Lock()
+	defer c.lifecycleAccess.Unlock()
+	return c.suspended.Load()
+}
+
+func (c *Client) waitResumed(ctx context.Context) bool {
+	c.lifecycleAccess.Lock()
+	if !c.suspended.Load() {
+		c.lifecycleAccess.Unlock()
+		return true
+	}
+	resumed := c.resumed
+	c.lifecycleAccess.Unlock()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-resumed:
+		return true
+	}
 }
 
 func (c *Client) signalStateChangedLocked() {
