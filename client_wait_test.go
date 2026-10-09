@@ -217,6 +217,82 @@ func TestClientIncomingDataQueueDropsInsteadOfBlocking(t *testing.T) {
 	}
 }
 
+func TestClientIncomingStreamDataWaitsForQueueSpace(t *testing.T) {
+	client, err := NewClient(ClientOptions{
+		Server:      "https://localhost",
+		Cookie:      "test-cookie",
+		QueueLength: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = client.Close() })
+	configuration := TunnelConfiguration{MTU: 1400}
+	session := &waitReadyTestSession{configuration: configuration, ready: true}
+	installWaitReadyTestSession(t, client, session, configuration)
+
+	for index := range 2 {
+		packetBuffer := buf.NewSize(1)
+		_, _ = packetBuffer.Write([]byte{byte(index + 1)})
+		done := make(chan struct{})
+		go func() {
+			client.pushIncomingStreamDataPacketContext(context.Background(), session, packetBuffer)
+			close(done)
+		}()
+		if index == 1 {
+			select {
+			case <-done:
+				t.Fatal("stream packet did not wait for queue space")
+			case <-time.After(50 * time.Millisecond):
+			}
+			packet, _, err := client.ReadDataPacketWithRevision(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(packet) != 1 || packet[0] != 1 {
+				t.Fatalf("unexpected first packet: %v", packet)
+			}
+		}
+		<-done
+	}
+	packet, _, err := client.ReadDataPacketWithRevision(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(packet) != 1 || packet[0] != 2 {
+		t.Fatalf("unexpected second packet: %v", packet)
+	}
+	if dropped := client.DroppedIncomingDataPackets(); dropped != 0 {
+		t.Fatalf("stream packet was dropped: %d", dropped)
+	}
+}
+
+func TestClientIncomingStreamDataWaitIsBounded(t *testing.T) {
+	client, err := NewClient(ClientOptions{
+		Server:      "https://localhost",
+		Cookie:      "test-cookie",
+		QueueLength: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = client.Close() })
+	configuration := TunnelConfiguration{MTU: 1400}
+	session := &waitReadyTestSession{configuration: configuration, ready: true}
+	installWaitReadyTestSession(t, client, session, configuration)
+
+	for index := range 2 {
+		packetBuffer := buf.NewSize(1)
+		_, _ = packetBuffer.Write([]byte{byte(index + 1)})
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+		client.pushIncomingStreamDataPacketContext(ctx, session, packetBuffer)
+		cancel()
+	}
+	if dropped := client.DroppedIncomingDataPackets(); dropped != 1 {
+		t.Fatalf("unexpected dropped incoming packet count: got %d, want 1", dropped)
+	}
+}
+
 func installWaitReadyTestSession(t *testing.T, client *Client, session clientSession, configuration TunnelConfiguration) uint64 {
 	t.Helper()
 	if !client.setCurrentSession(context.Background(), session) {

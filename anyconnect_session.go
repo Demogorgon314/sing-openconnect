@@ -355,7 +355,7 @@ func (s *anyConnectCSTPSession) readLoop() {
 			if s.client.options.DTLSRequired {
 				packetBuffer.Release()
 			} else {
-				s.client.pushIncomingDataPacketContext(s.ctx, s, packetBuffer)
+				s.client.pushIncomingStreamDataPacketContext(s.ctx, s, packetBuffer)
 			}
 		case cstpPacketDisconnect, cstpPacketTerminate:
 			reason := renderCSTPDisconnectReason(packetBuffer.Bytes())
@@ -386,7 +386,7 @@ func (s *anyConnectCSTPSession) readLoop() {
 					continue
 				}
 			}
-			s.client.pushIncomingDataPacketContext(s.ctx, s, decompressedPacket)
+			s.client.pushIncomingStreamDataPacketContext(s.ctx, s, decompressedPacket)
 		default:
 			packetBuffer.Release()
 			s.terminate(E.Extend(ErrProtocolNotSupported, "received unknown CSTP packet type: ", packetType))

@@ -22,6 +22,7 @@ const (
 	defaultClientVersion            = "v9.21"
 	defaultReconnectTimeout         = 300 * time.Second
 	defaultDataPacketQueueCapacity  = 32
+	incomingStreamDataPacketWait    = time.Second
 	defaultCertificateExpiryWarning = 60 * 24 * time.Hour
 	minimumConfiguredMTU            = 576
 )
@@ -726,6 +727,18 @@ func (c *Client) pushIncomingDataPacketContext(ctx context.Context, session clie
 }
 
 func (c *Client) pushIncomingDataPacketsContext(ctx context.Context, session clientSession, packetBuffers []*buf.Buffer) {
+	c.pushIncomingDataPacketsWithin(ctx, session, packetBuffers, 0)
+}
+
+// pushIncomingStreamDataPacketContext is for packets read from a reliable
+// stream such as CSTP. Dropping them would make the inner TCP retransmit over
+// a link that never lost them, so wait briefly for queue space and let the
+// stalled reader push back on the outer TCP window instead.
+func (c *Client) pushIncomingStreamDataPacketContext(ctx context.Context, session clientSession, packetBuffer *buf.Buffer) {
+	c.pushIncomingDataPacketsWithin(ctx, session, []*buf.Buffer{packetBuffer}, incomingStreamDataPacketWait)
+}
+
+func (c *Client) pushIncomingDataPacketsWithin(ctx context.Context, session clientSession, packetBuffers []*buf.Buffer, wait time.Duration) {
 	validBuffers := packetBuffers[:0]
 	for _, packetBuffer := range packetBuffers {
 		if packetBuffer == nil {
@@ -761,6 +774,13 @@ func (c *Client) pushIncomingDataPacketsContext(ctx context.Context, session cli
 	// Never block those readers behind a full data queue: openconnect's main
 	// loop likewise keeps DPD/rekey processing independent from TUN backpressure.
 	pushed := c.incomingDataPackets.TryPushBatch(ctx, packets)
+	if pushed < len(packets) && wait > 0 {
+		// The wait stays bounded so DPD and disconnect records behind this
+		// packet are still processed when the consumer stops reading.
+		waitCtx, cancel := context.WithTimeout(ctx, wait)
+		pushed += c.incomingDataPackets.PushBatch(waitCtx, packets[pushed:])
+		cancel()
+	}
 	if pushed < len(packets) {
 		c.droppedIncomingDataPackets.Add(uint64(len(packets) - pushed))
 		for _, packet := range packets[pushed:] {
