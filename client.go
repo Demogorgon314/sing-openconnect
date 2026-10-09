@@ -64,6 +64,8 @@ type Client struct {
 	lifecycleAccess                 sync.Mutex
 	started                         bool
 	closed                          bool
+	suspended                       atomic.Bool
+	resumed                         chan struct{}
 	terminalError                   error
 	currentSession                  clientSession
 	sessionGeneration               uint64
@@ -390,6 +392,36 @@ func (c *Client) RestartSession() {
 	if session != nil {
 		session.Fail(E.New("session restart requested"))
 	}
+}
+
+func (c *Client) Suspend() {
+	c.lifecycleAccess.Lock()
+	if c.suspended.Load() || c.closed {
+		c.lifecycleAccess.Unlock()
+		return
+	}
+	c.suspended.Store(true)
+	c.resumed = make(chan struct{})
+	session := c.publishedSession
+	c.lifecycleAccess.Unlock()
+	c.httpTransport.CloseIdleConnections()
+	if session != nil {
+		session.Fail(ErrClientSuspended)
+	}
+}
+
+func (c *Client) Resume() {
+	if !c.suspended.Load() {
+		return
+	}
+	c.lifecycleAccess.Lock()
+	if !c.suspended.Load() {
+		c.lifecycleAccess.Unlock()
+		return
+	}
+	c.suspended.Store(false)
+	close(c.resumed)
+	c.lifecycleAccess.Unlock()
 }
 
 // ReadDataPacket returns a caller-owned copy of the next packet.

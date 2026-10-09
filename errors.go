@@ -6,6 +6,7 @@ var (
 	ErrMissingServer                = E.New("missing openconnect server")
 	ErrUnsupportedFlavor            = E.New("unsupported openconnect flavor")
 	ErrClientClosed                 = E.New("client is closed")
+	ErrClientSuspended              = E.New("client is suspended")
 	ErrDataChannelNotReady          = E.New("data channel is not ready")
 	ErrDataPacketDeliveryUnknown    = E.New("data packet delivery state is unknown")
 	ErrNoPendingAuthChallenge       = E.New("no pending openconnect authentication challenge")
